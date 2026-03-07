@@ -523,7 +523,6 @@ class _AuthScreenState extends State<AuthScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final host = Uri.tryParse(widget.baseUrl)?.host ?? widget.baseUrl;
 
     return DefaultTabController(
       length: 2,
@@ -574,7 +573,7 @@ class _AuthScreenState extends State<AuthScreen> {
                                       ),
                                     ),
                                     Text(
-                                      'Messenger + social network',
+                                      'Private messaging platform',
                                       style: theme.textTheme.bodyMedium?.copyWith(
                                         color: theme.colorScheme.onSurfaceVariant,
                                       ),
@@ -583,27 +582,6 @@ class _AuthScreenState extends State<AuthScreen> {
                                 ),
                               ),
                             ],
-                          ),
-                          const SizedBox(height: 16),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF4F8FA),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: const Color(0xFFDCE8ED)),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.cloud_done_outlined, size: 18),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    'Server: $host',
-                                    style: theme.textTheme.bodyMedium,
-                                  ),
-                                ),
-                              ],
-                            ),
                           ),
                           const SizedBox(height: 18),
                           const TabBar(
@@ -725,11 +703,6 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _checkingUpdates = false;
   bool _dialogShown = false;
 
-  String get _serverLabel {
-    final uri = Uri.tryParse(widget.baseUrl);
-    return uri?.host.isNotEmpty == true ? uri!.host : widget.baseUrl;
-  }
-
   @override
   void initState() {
     super.initState();
@@ -842,7 +815,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final pages = [
       ChatsPage(api: _api),
-      FeedPage(api: _api),
       CustomizationPage(api: _api),
     ];
 
@@ -893,21 +865,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.primary.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        _serverLabel,
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: theme.colorScheme.primary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -932,14 +889,9 @@ class _HomeScreenState extends State<HomeScreen> {
             label: 'Chats',
           ),
           NavigationDestination(
-            icon: Icon(Icons.rss_feed_outlined),
-            selectedIcon: Icon(Icons.rss_feed),
-            label: 'Feed',
-          ),
-          NavigationDestination(
             icon: Icon(Icons.palette_outlined),
             selectedIcon: Icon(Icons.palette),
-            label: 'Theme',
+            label: 'Settings',
           ),
         ],
       ),
