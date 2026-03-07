@@ -1,10 +1,22 @@
 # GitHub Secrets For Auto Publish
 
-Add these repository secrets:
+With current project configuration, only one secret is required:
 
-- `DEPLOY_HOST` - server IP or domain
-- `DEPLOY_USER` - SSH user (for example `deploy`)
-- `DEPLOY_PORT` - usually `22`
-- `DEPLOY_SSH_KEY` - private SSH key (ed25519 recommended)
-- `DEPLOY_RELEASES_PATH` - server path for releases, for example `/opt/astralink/releases`
-- `RELEASES_PUBLIC_BASE_URL` - public URL mapped by nginx, for example `https://your-domain.example/files`
+- `DEPLOY_SSH_KEY` - private SSH key used to connect to `root@87.120.84.205`.
+
+Important:
+
+- Do NOT paste a fingerprint (`SHA256:...`) or `.pub` key.
+- Secret must contain the PRIVATE key (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... PRIVATE KEY-----`).
+- Key must be without passphrase for CI.
+
+You can provide `DEPLOY_SSH_KEY` in either format:
+
+1. Raw multiline private key (recommended)
+2. Base64 of private key bytes
+
+PowerShell (create base64 from key file):
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\\.ssh\\astralink_deploy_nopass"))
+```
