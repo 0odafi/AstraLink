@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class UserPublic(BaseModel):
     id: int
     username: str
+    uid: str | None
     email: str
     bio: str
     avatar_url: str | None
@@ -17,6 +18,7 @@ class UserPublic(BaseModel):
 class ProfileUpdate(BaseModel):
     bio: str | None = Field(default=None, max_length=1000)
     avatar_url: str | None = Field(default=None, max_length=500)
+    uid: str | None = Field(default=None, min_length=5, max_length=32)
 
 
 class FollowActionResult(BaseModel):

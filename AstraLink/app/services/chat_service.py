@@ -1,9 +1,23 @@
-from sqlalchemy import and_, desc, or_, select
+from collections import defaultdict
+from datetime import UTC, datetime
+
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.chat import Chat, ChatMember, ChatType, MemberRole, Message, MessageReaction
+from app.models.chat import (
+    Chat,
+    ChatMember,
+    ChatType,
+    MemberRole,
+    Message,
+    MessageDelivery,
+    MessageDeliveryStatus,
+    MessageLink,
+    MessageReaction,
+    PinnedMessage,
+)
 from app.models.user import User
-from app.schemas.chat import ChatCreate
+from app.schemas.chat import ChatCreate, MessageOut
 
 
 def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
@@ -37,9 +51,45 @@ def get_user_chats(db: Session, user_id: int) -> list[Chat]:
         select(Chat)
         .join(ChatMember, ChatMember.chat_id == Chat.id)
         .where(ChatMember.user_id == user_id)
-        .order_by(Chat.created_at.desc())
     )
-    return list(db.scalars(statement).all())
+    chats = list(db.scalars(statement).all())
+    for chat in chats:
+        last_message = db.scalar(
+            select(Message).where(Message.chat_id == chat.id).order_by(Message.id.desc()).limit(1)
+        )
+        last_preview = last_message.content if last_message else None
+        if isinstance(last_preview, str) and len(last_preview) > 140:
+            last_preview = f"{last_preview[:140]}..."
+
+        unread_count = db.scalar(
+            select(func.count(Message.id))
+            .select_from(Message)
+            .outerjoin(
+                MessageDelivery,
+                and_(
+                    MessageDelivery.message_id == Message.id,
+                    MessageDelivery.user_id == user_id,
+                ),
+            )
+            .where(
+                and_(
+                    Message.chat_id == chat.id,
+                    Message.sender_id != user_id,
+                    or_(
+                        MessageDelivery.id.is_(None),
+                        MessageDelivery.status != MessageDeliveryStatus.READ,
+                    ),
+                )
+            )
+        )
+
+        setattr(chat, "last_message_preview", last_preview)
+        setattr(chat, "last_message_at", last_message.created_at if last_message else None)
+        setattr(chat, "unread_count", int(unread_count or 0))
+        setattr(chat, "_sort_ts", last_message.created_at if last_message else chat.created_at)
+
+    chats.sort(key=lambda chat: getattr(chat, "_sort_ts", chat.created_at), reverse=True)
+    return chats
 
 
 def get_chat_for_member(db: Session, chat_id: int, user_id: int) -> Chat:
@@ -53,20 +103,32 @@ def get_chat_for_member(db: Session, chat_id: int, user_id: int) -> Chat:
     return chat
 
 
+def _get_membership(db: Session, chat_id: int, user_id: int) -> ChatMember | None:
+    return db.scalar(select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id)))
+
+
+def _require_member(db: Session, chat_id: int, user_id: int) -> ChatMember:
+    membership = _get_membership(db, chat_id=chat_id, user_id=user_id)
+    if not membership:
+        raise ValueError("You are not a member of this chat")
+    return membership
+
+
+def _require_admin_or_owner(db: Session, chat_id: int, user_id: int) -> ChatMember:
+    membership = _require_member(db, chat_id=chat_id, user_id=user_id)
+    if membership.role not in {MemberRole.OWNER, MemberRole.ADMIN}:
+        raise ValueError("Only owner/admin can perform this action")
+    return membership
+
+
 def add_member(db: Session, chat_id: int, requester_id: int, user_id: int, role: MemberRole) -> ChatMember:
-    requester = db.scalar(
-        select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == requester_id))
-    )
-    if not requester or requester.role not in {MemberRole.OWNER, MemberRole.ADMIN}:
-        raise ValueError("Only owner/admin can add members")
+    _require_admin_or_owner(db, chat_id=chat_id, user_id=requester_id)
 
     target_user = db.scalar(select(User).where(User.id == user_id))
     if not target_user:
         raise ValueError("Target user does not exist")
 
-    existing = db.scalar(
-        select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id))
-    )
+    existing = db.scalar(select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id)))
     if existing:
         return existing
 
@@ -77,31 +139,261 @@ def add_member(db: Session, chat_id: int, requester_id: int, user_id: int, role:
     return member
 
 
-def create_message(db: Session, chat_id: int, sender_id: int, content: str) -> Message:
-    membership = db.scalar(
-        select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == sender_id))
-    )
-    if not membership:
-        raise ValueError("You are not a member of this chat")
+def create_message(
+    db: Session,
+    chat_id: int,
+    sender_id: int,
+    content: str,
+    reply_to_message_id: int | None = None,
+    forward_from_message_id: int | None = None,
+) -> Message:
+    _require_member(db, chat_id=chat_id, user_id=sender_id)
+
+    if reply_to_message_id is not None:
+        reply_message = db.scalar(select(Message).where(Message.id == reply_to_message_id))
+        if not reply_message or reply_message.chat_id != chat_id:
+            raise ValueError("Reply target message not found in this chat")
+
+    if forward_from_message_id is not None:
+        source_message = db.scalar(select(Message).where(Message.id == forward_from_message_id))
+        if not source_message:
+            raise ValueError("Forward source message not found")
+        _require_member(db, chat_id=source_message.chat_id, user_id=sender_id)
 
     message = Message(chat_id=chat_id, sender_id=sender_id, content=content)
     db.add(message)
+    db.flush()
+
+    if reply_to_message_id is not None or forward_from_message_id is not None:
+        db.add(
+            MessageLink(
+                message_id=message.id,
+                reply_to_message_id=reply_to_message_id,
+                forwarded_from_message_id=forward_from_message_id,
+            )
+        )
+
+    member_ids = list(db.scalars(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id)).all())
+    for member_id in member_ids:
+        status = MessageDeliveryStatus.READ if member_id == sender_id else MessageDeliveryStatus.DELIVERED
+        db.add(
+            MessageDelivery(
+                message_id=message.id,
+                user_id=member_id,
+                status=status,
+            )
+        )
+
     db.commit()
     db.refresh(message)
     return message
 
 
-def list_messages(db: Session, chat_id: int, user_id: int, limit: int = 100) -> list[Message]:
-    _ = get_chat_for_member(db, chat_id=chat_id, user_id=user_id)
-    statement = (
-        select(Message)
-        .where(Message.chat_id == chat_id)
-        .order_by(desc(Message.created_at))
-        .limit(limit)
+def _mark_messages_read(db: Session, messages: list[Message], user_id: int) -> None:
+    if not messages:
+        return
+
+    message_ids = [m.id for m in messages if m.sender_id != user_id]
+    if not message_ids:
+        return
+
+    existing = list(
+        db.scalars(
+            select(MessageDelivery).where(
+                and_(
+                    MessageDelivery.user_id == user_id,
+                    MessageDelivery.message_id.in_(message_ids),
+                )
+            )
+        ).all()
     )
-    rows = list(db.scalars(statement).all())
-    rows.reverse()
+    existing_map = {row.message_id: row for row in existing}
+    now = datetime.now(UTC)
+
+    changed = False
+    for message_id in message_ids:
+        delivery = existing_map.get(message_id)
+        if delivery is None:
+            db.add(
+                MessageDelivery(
+                    message_id=message_id,
+                    user_id=user_id,
+                    status=MessageDeliveryStatus.READ,
+                    updated_at=now,
+                )
+            )
+            changed = True
+            continue
+
+        if delivery.status != MessageDeliveryStatus.READ:
+            delivery.status = MessageDeliveryStatus.READ
+            delivery.updated_at = now
+            changed = True
+
+    if changed:
+        db.commit()
+
+
+def serialize_messages(db: Session, messages: list[Message], user_id: int) -> list[MessageOut]:
+    if not messages:
+        return []
+
+    message_ids = [m.id for m in messages]
+    links = list(db.scalars(select(MessageLink).where(MessageLink.message_id.in_(message_ids))).all())
+    links_map = {link.message_id: link for link in links}
+
+    all_deliveries = list(
+        db.scalars(select(MessageDelivery).where(MessageDelivery.message_id.in_(message_ids))).all()
+    )
+    deliveries_by_message: dict[int, list[MessageDelivery]] = defaultdict(list)
+    viewer_deliveries: dict[int, MessageDelivery] = {}
+    for delivery in all_deliveries:
+        deliveries_by_message[delivery.message_id].append(delivery)
+        if delivery.user_id == user_id:
+            viewer_deliveries[delivery.message_id] = delivery
+
+    pinned_message_ids = set(
+        db.scalars(select(PinnedMessage.message_id).where(PinnedMessage.message_id.in_(message_ids))).all()
+    )
+
+    result: list[MessageOut] = []
+    for message in messages:
+        link = links_map.get(message.id)
+        if message.sender_id == user_id:
+            peer_statuses = [
+                row.status for row in deliveries_by_message.get(message.id, []) if row.user_id != user_id
+            ]
+            if not peer_statuses:
+                status = MessageDeliveryStatus.READ
+            elif all(value == MessageDeliveryStatus.READ for value in peer_statuses):
+                status = MessageDeliveryStatus.READ
+            elif all(value in {MessageDeliveryStatus.DELIVERED, MessageDeliveryStatus.READ} for value in peer_statuses):
+                status = MessageDeliveryStatus.DELIVERED
+            else:
+                status = MessageDeliveryStatus.SENT
+        else:
+            delivery = viewer_deliveries.get(message.id)
+            status = delivery.status if delivery else MessageDeliveryStatus.SENT
+
+        result.append(
+            MessageOut(
+                id=message.id,
+                chat_id=message.chat_id,
+                sender_id=message.sender_id,
+                content=message.content,
+                created_at=message.created_at,
+                edited_at=message.edited_at,
+                status=status,
+                reply_to_message_id=link.reply_to_message_id if link else None,
+                forwarded_from_message_id=link.forwarded_from_message_id if link else None,
+                is_pinned=message.id in pinned_message_ids,
+            )
+        )
+    return result
+
+
+def list_messages(db: Session, chat_id: int, user_id: int, limit: int = 100) -> list[Message]:
+    rows, _ = list_messages_cursor(db, chat_id=chat_id, user_id=user_id, limit=limit, before_id=None)
     return rows
+
+
+def list_messages_cursor(
+    db: Session,
+    chat_id: int,
+    user_id: int,
+    limit: int = 100,
+    before_id: int | None = None,
+) -> tuple[list[Message], int | None]:
+    _ = get_chat_for_member(db, chat_id=chat_id, user_id=user_id)
+    statement = select(Message).where(Message.chat_id == chat_id)
+    if before_id is not None:
+        statement = statement.where(Message.id < before_id)
+    statement = statement.order_by(desc(Message.id)).limit(limit + 1)
+
+    rows_desc = list(db.scalars(statement).all())
+    has_more = len(rows_desc) > limit
+    if has_more:
+        rows_desc = rows_desc[:limit]
+        next_before_id = rows_desc[-1].id
+    else:
+        next_before_id = None
+
+    rows_desc.reverse()
+    _mark_messages_read(db, rows_desc, user_id=user_id)
+    return rows_desc, next_before_id
+
+
+def update_message_content(db: Session, message_id: int, user_id: int, content: str) -> Message:
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    if not message:
+        raise ValueError("Message not found")
+
+    _require_member(db, chat_id=message.chat_id, user_id=user_id)
+    if message.sender_id != user_id:
+        raise ValueError("Only sender can edit message")
+
+    message.content = content
+    message.edited_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def delete_message(db: Session, message_id: int, user_id: int) -> int | None:
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    if not message:
+        return None
+
+    membership = _require_member(db, chat_id=message.chat_id, user_id=user_id)
+    if message.sender_id != user_id and membership.role not in {MemberRole.OWNER, MemberRole.ADMIN}:
+        raise ValueError("Only sender or admin/owner can delete message")
+
+    chat_id = message.chat_id
+    db.delete(message)
+    db.commit()
+    return chat_id
+
+
+def pin_message(db: Session, chat_id: int, message_id: int, user_id: int) -> PinnedMessage:
+    _require_admin_or_owner(db, chat_id=chat_id, user_id=user_id)
+
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    if not message or message.chat_id != chat_id:
+        raise ValueError("Message not found in this chat")
+
+    existing = db.scalar(
+        select(PinnedMessage).where(
+            and_(
+                PinnedMessage.chat_id == chat_id,
+                PinnedMessage.message_id == message_id,
+            )
+        )
+    )
+    if existing:
+        return existing
+
+    pin = PinnedMessage(chat_id=chat_id, message_id=message_id, pinned_by_id=user_id)
+    db.add(pin)
+    db.commit()
+    db.refresh(pin)
+    return pin
+
+
+def unpin_message(db: Session, chat_id: int, message_id: int, user_id: int) -> bool:
+    _require_admin_or_owner(db, chat_id=chat_id, user_id=user_id)
+    pin = db.scalar(
+        select(PinnedMessage).where(
+            and_(
+                PinnedMessage.chat_id == chat_id,
+                PinnedMessage.message_id == message_id,
+            )
+        )
+    )
+    if not pin:
+        return False
+    db.delete(pin)
+    db.commit()
+    return True
 
 
 def react_to_message(db: Session, message_id: int, user_id: int, emoji: str) -> MessageReaction:
@@ -109,11 +401,7 @@ def react_to_message(db: Session, message_id: int, user_id: int, emoji: str) -> 
     if not message:
         raise ValueError("Message not found")
 
-    membership = db.scalar(
-        select(ChatMember).where(and_(ChatMember.chat_id == message.chat_id, ChatMember.user_id == user_id))
-    )
-    if not membership:
-        raise ValueError("Not allowed to react in this chat")
+    _ = _require_member(db, chat_id=message.chat_id, user_id=user_id)
 
     existing = db.scalar(
         select(MessageReaction).where(
@@ -152,9 +440,7 @@ def remove_message_reaction(db: Session, message_id: int, user_id: int, emoji: s
 
 
 def can_access_chat(db: Session, chat_id: int, user_id: int) -> bool:
-    membership = db.scalar(
-        select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id))
-    )
+    membership = db.scalar(select(ChatMember).where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id == user_id)))
     if membership:
         return True
 

@@ -1,18 +1,47 @@
+import re
+
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.user import Follow, User
+
+UID_RE = re.compile(r"^[a-z0-9_]{5,32}$")
+
+
+def normalize_uid(value: str) -> str:
+    return value.strip().lower()
+
+
+def validate_uid(value: str) -> bool:
+    return bool(UID_RE.fullmatch(value))
 
 
 def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
     pattern = f"%{query.lower()}%"
     statement = (
         select(User)
-        .where(or_(User.username.ilike(pattern), User.email.ilike(pattern)))
+        .where(
+            or_(
+                User.uid.ilike(pattern),
+                User.username.ilike(pattern),
+                User.email.ilike(pattern),
+            )
+        )
         .order_by(User.username.asc())
         .limit(limit)
     )
     return list(db.scalars(statement).all())
+
+
+def find_user_by_uid(db: Session, uid: str) -> User | None:
+    normalized = normalize_uid(uid)
+    return db.scalar(select(User).where(User.uid == normalized))
+
+
+def ensure_uid_available(db: Session, uid: str, current_user_id: int | None = None) -> None:
+    existing = db.scalar(select(User).where(User.uid == uid))
+    if existing and existing.id != current_user_id:
+        raise ValueError("UID is already taken")
 
 
 def follow_user(db: Session, follower_id: int, following_id: int) -> Follow:

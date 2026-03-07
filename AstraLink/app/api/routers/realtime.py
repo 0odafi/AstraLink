@@ -3,8 +3,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from app.api.deps import get_current_user_from_raw_token
 from app.core.database import SessionLocal
 from app.realtime.manager import chat_manager
-from app.schemas.chat import MessageOut
-from app.services.chat_service import can_access_chat, create_message
+from app.services.chat_service import can_access_chat, create_message, serialize_messages
 
 router = APIRouter(tags=["Realtime"])
 
@@ -49,15 +48,20 @@ async def chat_socket(
                 continue
 
             db = SessionLocal()
+            serialized = None
             try:
                 message = create_message(db, chat_id=chat_id, sender_id=user.id, content=content)
+                serialized = serialize_messages(db, [message], user_id=user.id)[0]
             except ValueError as exc:
                 await websocket.send_json({"type": "error", "message": str(exc)})
                 continue
             finally:
                 db.close()
 
-            payload = MessageOut.model_validate(message).model_dump(mode="json")
+            if serialized is None:
+                continue
+
+            payload = serialized.model_dump(mode="json")
             await chat_manager.broadcast(chat_id, {"type": "message", "chat_id": chat_id, "message": payload})
     except WebSocketDisconnect:
         chat_manager.disconnect(chat_id, websocket)

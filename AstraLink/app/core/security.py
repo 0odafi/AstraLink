@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import os
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -62,3 +63,11 @@ def decode_access_token(token: str) -> dict[str, str]:
     except InvalidTokenError as exc:
         raise ValueError("Invalid or expired token") from exc
     return payload
+
+
+def generate_refresh_token() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()

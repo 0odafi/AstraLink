@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     secret_key: str = "change-this-in-production"
     access_token_expire_minutes: int = 60 * 24 * 7
+    refresh_token_expire_days: int = 90
     database_url: str = "sqlite:///./astralink.db"
     cors_origins: str = "*"
     release_manifest_path: str = "./releases/manifest.json"

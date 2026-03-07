@@ -23,6 +23,12 @@ class MemberRole(str, Enum):
     MEMBER = "member"
 
 
+class MessageDeliveryStatus(str, Enum):
+    SENT = "sent"
+    DELIVERED = "delivered"
+    READ = "read"
+
+
 class Chat(Base):
     __tablename__ = "chats"
 
@@ -67,6 +73,20 @@ class Message(Base):
         back_populates="message",
         cascade="all, delete-orphan",
     )
+    link: Mapped["MessageLink | None"] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        uselist=False,
+        foreign_keys="MessageLink.message_id",
+    )
+    deliveries: Mapped[list["MessageDelivery"]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+    )
+    pins: Mapped[list["PinnedMessage"]] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+    )
 
 
 class MessageReaction(Base):
@@ -80,3 +100,52 @@ class MessageReaction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     message: Mapped["Message"] = relationship(back_populates="reactions")
+
+
+class MessageLink(Base):
+    __tablename__ = "message_links"
+    __table_args__ = (UniqueConstraint("message_id", name="uq_message_link_message"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
+    reply_to_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    forwarded_from_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    message: Mapped["Message"] = relationship(back_populates="link", foreign_keys=[message_id])
+
+
+class MessageDelivery(Base):
+    __tablename__ = "message_deliveries"
+    __table_args__ = (UniqueConstraint("message_id", "user_id", name="uq_message_delivery"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[MessageDeliveryStatus] = mapped_column(
+        SqlEnum(MessageDeliveryStatus),
+        default=MessageDeliveryStatus.SENT,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    message: Mapped["Message"] = relationship(back_populates="deliveries")
+
+
+class PinnedMessage(Base):
+    __tablename__ = "pinned_messages"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_pinned_chat_message"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
+    pinned_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    pinned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    message: Mapped["Message"] = relationship(back_populates="pins")

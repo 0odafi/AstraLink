@@ -47,11 +47,14 @@ Demo users:
 ### Auth
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
 
 ### Users + Social Graph
 - `GET /api/users/me`
 - `PATCH /api/users/me`
 - `GET /api/users/search?q=...`
+- `GET /api/users/by-uid/{uid}`
 - `POST /api/users/{user_id}/follow`
 - `DELETE /api/users/{user_id}/follow`
 - `GET /api/users/{user_id}/followers`
@@ -113,6 +116,7 @@ Artifacts are placed in `dist/windows/<version>` and `dist/android/<version>`.
 - Workflow: `.github/workflows/release-publish.yml`
 - Server setup guide: `deploy/ubuntu/README.md`
 - Required GitHub secrets: `deploy/github-secrets.md`
+- Current target server: `root@87.120.84.205` (`volds.ru`)
 - Publish trigger:
   - manual workflow run with version input
   - push tag like `v1.0.1+2`

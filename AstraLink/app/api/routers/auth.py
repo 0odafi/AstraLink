@@ -2,8 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
-from app.services.auth_service import authenticate_user, build_token_response, register_user
+from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
+from app.services.auth_service import (
+    authenticate_user,
+    build_token_response,
+    register_user,
+    revoke_refresh_token,
+    rotate_refresh_token,
+)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -14,7 +20,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
         user = register_user(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return build_token_response(user)
+    return build_token_response(db, user)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -22,4 +28,18 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     user = authenticate_user(db, login=payload.login, password=payload.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid login or password")
-    return build_token_response(user)
+    return build_token_response(db, user)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    try:
+        return rotate_refresh_token(db, payload.refresh_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+
+@router.post("/logout")
+def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> dict[str, bool]:
+    revoked = revoke_refresh_token(db, payload.refresh_token)
+    return {"revoked": revoked}

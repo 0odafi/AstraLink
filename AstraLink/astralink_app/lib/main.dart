@@ -20,6 +20,11 @@ const Set<String> _legacyLocalBaseUrls = {
   'https://127.0.0.1:8000',
 };
 
+const String kPrefUpdateChannel = 'astralink_update_channel';
+const String kPrefAutoUpdateCheck = 'astralink_auto_update_check';
+const String kPrefUpdateNotifications = 'astralink_update_notifications';
+const String kPrefSkippedVersion = 'astralink_skipped_update_version';
+
 void main() {
   runApp(const AstraLinkApp());
 }
@@ -70,6 +75,16 @@ bool isVersionNewer(String candidate, String current) {
     if (c1[i] < c2[i]) return false;
   }
   return false;
+}
+
+class SessionTokens {
+  final String accessToken;
+  final String refreshToken;
+
+  const SessionTokens({
+    required this.accessToken,
+    required this.refreshToken,
+  });
 }
 
 ThemeData _buildTheme() {
@@ -164,11 +179,13 @@ class AstraLinkApp extends StatefulWidget {
 }
 
 class _AstraLinkAppState extends State<AstraLinkApp> {
-  static const _tokenKey = 'astralink_token';
+  static const _accessTokenKey = 'astralink_token';
+  static const _refreshTokenKey = 'astralink_refresh_token';
   static const _baseUrlKey = 'astralink_base_url';
 
   bool _loading = true;
-  String? _token;
+  String? _accessToken;
+  String? _refreshToken;
   String _baseUrl = inferDefaultBaseUrl();
 
   @override
@@ -190,33 +207,61 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
     }
 
     setState(() {
-      _token = prefs.getString(_tokenKey);
+      _accessToken = prefs.getString(_accessTokenKey);
+      _refreshToken = prefs.getString(_refreshTokenKey);
       _baseUrl = migratedBase;
       _loading = false;
     });
   }
 
-  Future<void> _saveSession({required String baseUrl, String? token}) async {
+  Future<void> _saveSession({
+    required String baseUrl,
+    String? accessToken,
+    String? refreshToken,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_baseUrlKey, normalizeBaseUrl(baseUrl));
-    if (token == null) {
-      await prefs.remove(_tokenKey);
+    if (accessToken == null) {
+      await prefs.remove(_accessTokenKey);
+      await prefs.remove(_refreshTokenKey);
     } else {
-      await prefs.setString(_tokenKey, token);
+      await prefs.setString(_accessTokenKey, accessToken);
+      if (refreshToken != null && refreshToken.isNotEmpty) {
+        await prefs.setString(_refreshTokenKey, refreshToken);
+      }
     }
   }
 
-  Future<void> _onAuthenticated(String token) async {
-    await _saveSession(baseUrl: _baseUrl, token: token);
+  Future<void> _onAuthenticated(SessionTokens tokens) async {
+    await _saveSession(
+      baseUrl: _baseUrl,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    );
     setState(() {
-      _token = token;
+      _accessToken = tokens.accessToken;
+      _refreshToken = tokens.refreshToken;
+    });
+  }
+
+  Future<void> _onSessionUpdated(SessionTokens tokens) async {
+    await _saveSession(
+      baseUrl: _baseUrl,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    );
+    if (!mounted) return;
+    setState(() {
+      _accessToken = tokens.accessToken;
+      _refreshToken = tokens.refreshToken;
     });
   }
 
   Future<void> _onLogout() async {
-    await _saveSession(baseUrl: _baseUrl, token: null);
+    await _saveSession(baseUrl: _baseUrl, accessToken: null, refreshToken: null);
     setState(() {
-      _token = null;
+      _accessToken = null;
+      _refreshToken = null;
     });
   }
 
@@ -233,14 +278,16 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
       title: 'AstraLink',
       debugShowCheckedModeBanner: false,
       theme: _buildTheme(),
-      home: _token == null
+      home: _accessToken == null
           ? AuthScreen(
               baseUrl: _baseUrl,
               onAuthenticated: _onAuthenticated,
             )
           : HomeScreen(
-              token: _token!,
+              token: _accessToken!,
+              refreshToken: _refreshToken,
               baseUrl: _baseUrl,
+              onSessionUpdated: _onSessionUpdated,
               onLogout: _onLogout,
             ),
     );
@@ -255,9 +302,18 @@ class ApiException implements Exception {
 }
 class ApiClient {
   final String baseUrl;
-  final String? token;
+  String? accessToken;
+  String? refreshToken;
+  final Future<void> Function(SessionTokens tokens)? onSessionUpdated;
+  final Future<void> Function()? onUnauthorized;
 
-  ApiClient({required this.baseUrl, this.token});
+  ApiClient({
+    required this.baseUrl,
+    this.accessToken,
+    this.refreshToken,
+    this.onSessionUpdated,
+    this.onUnauthorized,
+  });
 
   String get _safeBase => baseUrl.endsWith('/')
       ? baseUrl.substring(0, baseUrl.length - 1)
@@ -265,70 +321,129 @@ class ApiClient {
 
   Map<String, String> _headers({bool withAuth = true}) {
     final headers = <String, String>{'Content-Type': 'application/json'};
-    if (withAuth && token != null && token!.isNotEmpty) {
-      headers['Authorization'] = 'Bearer $token';
+    if (withAuth && accessToken != null && accessToken!.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $accessToken';
     }
     return headers;
+  }
+
+  Future<http.Response> _sendHttp(
+    String method,
+    Uri uri, {
+    required bool withAuth,
+    Object? body,
+  }) async {
+    switch (method) {
+      case 'GET':
+        return http
+            .get(uri, headers: _headers(withAuth: withAuth))
+            .timeout(const Duration(seconds: 25));
+      case 'POST':
+        return http
+            .post(
+              uri,
+              headers: _headers(withAuth: withAuth),
+              body: body == null ? null : jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 25));
+      case 'PATCH':
+        return http
+            .patch(
+              uri,
+              headers: _headers(withAuth: withAuth),
+              body: body == null ? null : jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 25));
+      case 'PUT':
+        return http
+            .put(
+              uri,
+              headers: _headers(withAuth: withAuth),
+              body: body == null ? null : jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 25));
+      case 'DELETE':
+        return http
+            .delete(
+              uri,
+              headers: _headers(withAuth: withAuth),
+              body: body == null ? null : jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 25));
+      default:
+        throw ApiException('Unsupported method: $method');
+    }
+  }
+
+  dynamic _decodeResponse(http.Response response) {
+    if (response.body.isEmpty) return null;
+    try {
+      return jsonDecode(response.body);
+    } catch (_) {
+      throw ApiException('Invalid JSON response from server');
+    }
+  }
+
+  Future<bool> _tryRefreshAccessToken() async {
+    final token = refreshToken;
+    if (token == null || token.isEmpty) return false;
+
+    try {
+      final result = await _request(
+        'POST',
+        '/api/auth/refresh',
+        withAuth: false,
+        allowRefresh: false,
+        body: {'refresh_token': token},
+      );
+      final payload = Map<String, dynamic>.from(result as Map);
+      final newAccess = payload['access_token']?.toString();
+      final newRefresh = payload['refresh_token']?.toString();
+      if (newAccess == null || newAccess.isEmpty || newRefresh == null || newRefresh.isEmpty) {
+        return false;
+      }
+
+      accessToken = newAccess;
+      refreshToken = newRefresh;
+      if (onSessionUpdated != null) {
+        await onSessionUpdated!(
+          SessionTokens(accessToken: newAccess, refreshToken: newRefresh),
+        );
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<dynamic> _request(
     String method,
     String path, {
     bool withAuth = true,
+    bool allowRefresh = true,
     Object? body,
   }) async {
     final uri = Uri.parse('$_safeBase$path');
     late http.Response response;
 
     try {
-      switch (method) {
-        case 'GET':
-          response = await http
-              .get(uri, headers: _headers(withAuth: withAuth))
-              .timeout(const Duration(seconds: 25));
-          break;
-        case 'POST':
-          response = await http
-              .post(
-                uri,
-                headers: _headers(withAuth: withAuth),
-                body: body == null ? null : jsonEncode(body),
-              )
-              .timeout(const Duration(seconds: 25));
-          break;
-        case 'PATCH':
-          response = await http
-              .patch(
-                uri,
-                headers: _headers(withAuth: withAuth),
-                body: body == null ? null : jsonEncode(body),
-              )
-              .timeout(const Duration(seconds: 25));
-          break;
-        case 'PUT':
-          response = await http
-              .put(
-                uri,
-                headers: _headers(withAuth: withAuth),
-                body: body == null ? null : jsonEncode(body),
-              )
-              .timeout(const Duration(seconds: 25));
-          break;
-        default:
-          throw ApiException('Unsupported method: $method');
-      }
+      response = await _sendHttp(method, uri, withAuth: withAuth, body: body);
     } on TimeoutException {
       throw ApiException('Connection timeout. Check internet or server status.');
+    } catch (_) {
+      throw ApiException('Network error. Check internet or server DNS.');
     }
 
-    dynamic decoded;
-    if (response.body.isNotEmpty) {
-      try {
-        decoded = jsonDecode(response.body);
-      } catch (_) {
-        throw ApiException('Invalid JSON response from server');
+    if (response.statusCode == 401 && withAuth && allowRefresh) {
+      final refreshed = await _tryRefreshAccessToken();
+      if (refreshed) {
+        response = await _sendHttp(method, uri, withAuth: withAuth, body: body);
+      } else if (onUnauthorized != null) {
+        await onUnauthorized!();
       }
     }
+
+    final decoded = _decodeResponse(response);
 
     if (response.statusCode >= 400) {
       if (decoded is Map<String, dynamic> && decoded['detail'] != null) {
@@ -363,8 +478,51 @@ class ApiClient {
     return Map<String, dynamic>.from(result as Map);
   }
 
+  Future<void> logoutRemote() async {
+    final token = refreshToken;
+    if (token == null || token.isEmpty) return;
+    try {
+      await _request(
+        'POST',
+        '/api/auth/logout',
+        withAuth: false,
+        allowRefresh: false,
+        body: {'refresh_token': token},
+      );
+    } catch (_) {
+      // Ignore logout transport failures on client side.
+    }
+  }
+
   Future<Map<String, dynamic>> me() async {
     final result = await _request('GET', '/api/users/me');
+    return Map<String, dynamic>.from(result as Map);
+  }
+
+  Future<Map<String, dynamic>> updateProfile({
+    String? bio,
+    String? avatarUrl,
+    String? uid,
+  }) async {
+    final payload = <String, dynamic>{};
+    if (bio != null) payload['bio'] = bio;
+    if (avatarUrl != null) payload['avatar_url'] = avatarUrl;
+    if (uid != null) payload['uid'] = uid;
+    final result = await _request('PATCH', '/api/users/me', body: payload);
+    return Map<String, dynamic>.from(result as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> searchUsers(String query) async {
+    final encoded = Uri.encodeQueryComponent(query);
+    final result = await _request('GET', '/api/users/search?q=$encoded');
+    return (result as List)
+        .map((row) => Map<String, dynamic>.from(row as Map))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> userByUid(String uid) async {
+    final encoded = Uri.encodeComponent(uid);
+    final result = await _request('GET', '/api/users/by-uid/$encoded');
     return Map<String, dynamic>.from(result as Map);
   }
 
@@ -465,7 +623,7 @@ class ApiClient {
 }
 class AuthScreen extends StatefulWidget {
   final String baseUrl;
-  final Future<void> Function(String token) onAuthenticated;
+  final Future<void> Function(SessionTokens tokens) onAuthenticated;
 
   const AuthScreen({
     super.key,
@@ -503,11 +661,17 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       final client = ApiClient(baseUrl: widget.baseUrl);
       final response = await action(client);
-      final token = response['access_token']?.toString();
-      if (token == null || token.isEmpty) {
-        throw ApiException('Token not received');
+      final accessToken = response['access_token']?.toString();
+      final refreshToken = response['refresh_token']?.toString();
+      if (accessToken == null || accessToken.isEmpty) {
+        throw ApiException('Access token not received');
       }
-      await widget.onAuthenticated(token);
+      if (refreshToken == null || refreshToken.isEmpty) {
+        throw ApiException('Refresh token not received');
+      }
+      await widget.onAuthenticated(
+        SessionTokens(accessToken: accessToken, refreshToken: refreshToken),
+      );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -680,13 +844,17 @@ class _AuthScreenState extends State<AuthScreen> {
 }
 class HomeScreen extends StatefulWidget {
   final String token;
+  final String? refreshToken;
   final String baseUrl;
+  final Future<void> Function(SessionTokens tokens) onSessionUpdated;
   final Future<void> Function() onLogout;
 
   const HomeScreen({
     super.key,
     required this.token,
+    required this.refreshToken,
     required this.baseUrl,
+    required this.onSessionUpdated,
     required this.onLogout,
   });
 
@@ -706,7 +874,13 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _api = ApiClient(baseUrl: widget.baseUrl, token: widget.token);
+    _api = ApiClient(
+      baseUrl: widget.baseUrl,
+      accessToken: widget.token,
+      refreshToken: widget.refreshToken,
+      onSessionUpdated: widget.onSessionUpdated,
+      onUnauthorized: widget.onLogout,
+    );
     _loadIdentity();
     _checkForUpdates();
   }
@@ -716,8 +890,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final me = await _api.me();
       final id = _asInt(me['id']);
       final username = me['username']?.toString() ?? 'User';
+      final uid = me['uid']?.toString();
+      final uidPart = uid == null || uid.isEmpty ? '' : ' @${uid.toLowerCase()}';
       setState(() {
-        _identity = id == null ? username : '$username (#$id)';
+        _identity = id == null ? '$username$uidPart' : '$username$uidPart (#$id)';
       });
     } catch (_) {
       setState(() {
@@ -726,33 +902,57 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _checkForUpdates() async {
+  Future<void> _checkForUpdates({bool force = false}) async {
     final platform = runtimePlatformKey();
     if (platform == 'web') return;
+    final prefs = await SharedPreferences.getInstance();
+    final autoCheck = prefs.getBool(kPrefAutoUpdateCheck) ?? true;
+    if (!force && !autoCheck) return;
+
+    final updateChannel = prefs.getString(kPrefUpdateChannel) ?? 'stable';
+    final notificationsEnabled = prefs.getBool(kPrefUpdateNotifications) ?? true;
 
     setState(() => _checkingUpdates = true);
     try {
       final info = await PackageInfo.fromPlatform();
       final currentVersion = '${info.version}+${info.buildNumber}';
-      final release = await _api.latestRelease(platform);
+      final release = await _api.latestRelease(platform, channel: updateChannel);
 
       setState(() {
         _currentVersion = currentVersion;
       });
 
-      if (release == null) return;
+      if (release == null) {
+        if (mounted) {
+          setState(() => _availableRelease = null);
+        }
+        return;
+      }
 
       final latest = release['latest_version']?.toString() ?? '';
-      if (!isVersionNewer(latest, currentVersion)) return;
+      if (!isVersionNewer(latest, currentVersion)) {
+        if (mounted) {
+          setState(() => _availableRelease = null);
+        }
+        return;
+      }
+
+      final skippedVersion = prefs.getString(kPrefSkippedVersion);
+      if (!force && skippedVersion != null && skippedVersion == latest) {
+        return;
+      }
 
       setState(() {
         _availableRelease = release;
       });
 
-      if (!_dialogShown) {
-        _dialogShown = true;
-        if (!mounted) return;
-        await _showUpdateDialog();
+      final mandatory = release['mandatory'] == true;
+      if (force || mandatory || notificationsEnabled) {
+        if (force || !_dialogShown) {
+          _dialogShown = true;
+          if (!mounted) return;
+          await _showUpdateDialog();
+        }
       }
     } catch (_) {
       // Ignore update checks in background.
@@ -761,6 +961,11 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() => _checkingUpdates = false);
       }
     }
+  }
+
+  Future<void> _skipUpdateVersion(String version) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(kPrefSkippedVersion, version);
   }
 
   Future<void> _openReleaseDownload() async {
@@ -776,6 +981,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (release == null || !mounted) return;
 
     final mandatory = release['mandatory'] == true;
+    final latestVersion = release['latest_version']?.toString() ?? '';
     await showDialog<void>(
       context: context,
       barrierDismissible: !mandatory,
@@ -787,7 +993,7 @@ class _HomeScreenState extends State<HomeScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('Current: ${_currentVersion ?? "unknown"}'),
-              Text('Latest: ${release['latest_version']}'),
+              Text('Latest: $latestVersion'),
               const SizedBox(height: 8),
               Text(release['notes']?.toString() ?? ''),
             ],
@@ -798,17 +1004,31 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Later'),
               ),
+            if (!mandatory && latestVersion.isNotEmpty)
+              TextButton(
+                onPressed: () async {
+                  await _skipUpdateVersion(latestVersion);
+                  if (!context.mounted) return;
+                  Navigator.pop(context);
+                },
+                child: const Text('Skip this version'),
+              ),
             FilledButton(
               onPressed: () async {
                 Navigator.pop(context);
                 await _openReleaseDownload();
               },
-              child: const Text('Download'),
+              child: const Text('Update'),
             ),
           ],
         );
       },
     );
+  }
+
+  Future<void> _logout() async {
+    await _api.logoutRemote();
+    await widget.onLogout();
   }
 
   @override
@@ -842,8 +1062,13 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: const Icon(Icons.system_update_alt_rounded),
             ),
           IconButton(
+            tooltip: 'Check updates',
+            onPressed: () => _checkForUpdates(force: true),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+          IconButton(
             tooltip: 'Logout',
-            onPressed: widget.onLogout,
+            onPressed: _logout,
             icon: const Icon(Icons.logout),
           ),
         ],
@@ -907,6 +1132,8 @@ class ChatsPage extends StatefulWidget {
 }
 
 class _ChatsPageState extends State<ChatsPage> {
+  final _chatSearchController = TextEditingController();
+  final _uidSearchController = TextEditingController();
   final _newChatController = TextEditingController();
   final _newMembersController = TextEditingController();
   final _messageController = TextEditingController();
@@ -914,7 +1141,10 @@ class _ChatsPageState extends State<ChatsPage> {
   List<Map<String, dynamic>> _chats = [];
   List<Map<String, dynamic>> _messages = [];
   int? _activeChatId;
+  String _chatQuery = '';
+  Map<String, dynamic>? _uidResult;
   bool _loading = false;
+  bool _uidLookupLoading = false;
 
   @override
   void initState() {
@@ -924,6 +1154,8 @@ class _ChatsPageState extends State<ChatsPage> {
 
   @override
   void dispose() {
+    _chatSearchController.dispose();
+    _uidSearchController.dispose();
     _newChatController.dispose();
     _newMembersController.dispose();
     _messageController.dispose();
@@ -942,9 +1174,21 @@ class _ChatsPageState extends State<ChatsPage> {
     setState(() => _loading = true);
     try {
       final chats = await widget.api.chats();
-      setState(() => _chats = chats);
-      if (_activeChatId != null) {
-        await _loadMessages(_activeChatId!);
+      int? nextActive = _activeChatId;
+      if (nextActive != null && !chats.any((chat) => _asInt(chat['id']) == nextActive)) {
+        nextActive = null;
+      }
+      nextActive ??= chats.isNotEmpty ? _asInt(chats.first['id']) : null;
+
+      setState(() {
+        _chats = chats;
+        _activeChatId = nextActive;
+      });
+
+      if (nextActive != null) {
+        await _loadMessages(nextActive);
+      } else {
+        setState(() => _messages = []);
       }
     } catch (error) {
       _show(error);
@@ -967,11 +1211,46 @@ class _ChatsPageState extends State<ChatsPage> {
 
   Future<void> _createChat() async {
     final title = _newChatController.text.trim();
-    if (title.isEmpty) return;
+    final members = _parseMemberIds();
+    if (title.isEmpty || members.isEmpty) return;
     try {
-      await widget.api.createChat(title: title, memberIds: _parseMemberIds());
+      await widget.api.createChat(title: title, memberIds: members);
       _newChatController.clear();
+      _newMembersController.clear();
       await _loadChats();
+    } catch (error) {
+      _show(error);
+    }
+  }
+
+  Future<void> _findUserByUid() async {
+    final uid = _uidSearchController.text.trim();
+    if (uid.isEmpty) return;
+
+    setState(() => _uidLookupLoading = true);
+    try {
+      final user = await widget.api.userByUid(uid);
+      setState(() => _uidResult = user);
+    } catch (error) {
+      setState(() => _uidResult = null);
+      _show(error);
+    } finally {
+      if (mounted) {
+        setState(() => _uidLookupLoading = false);
+      }
+    }
+  }
+
+  Future<void> _startPrivateFromUid() async {
+    final userId = _asInt(_uidResult?['id']);
+    final username = _uidResult?['username']?.toString() ?? 'Direct chat';
+    if (userId == null) return;
+
+    try {
+      await widget.api.createChat(title: username, memberIds: [userId]);
+      await _loadChats();
+      _uidSearchController.clear();
+      setState(() => _uidResult = null);
     } catch (error) {
       _show(error);
     }
@@ -998,13 +1277,252 @@ class _ChatsPageState extends State<ChatsPage> {
     ).showSnackBar(SnackBar(content: Text(error.toString())));
   }
 
+  List<Map<String, dynamic>> get _visibleChats {
+    final query = _chatQuery.trim().toLowerCase();
+    if (query.isEmpty) return _chats;
+    return _chats.where((chat) {
+      final title = chat['title']?.toString().toLowerCase() ?? '';
+      final lastMessage = chat['last_message_preview']?.toString().toLowerCase() ?? '';
+      return title.contains(query) || lastMessage.contains(query);
+    }).toList();
+  }
+
+  String _formatLastTime(dynamic raw) {
+    final text = raw?.toString();
+    if (text == null || text.isEmpty) return '';
+    final parsed = DateTime.tryParse(text);
+    if (parsed == null) return '';
+    final local = parsed.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
+  }
+
+  Widget _buildChatList(BuildContext context) {
+    final theme = Theme.of(context);
+    final chats = _visibleChats;
+
+    if (_loading && _chats.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (chats.isEmpty) {
+      return Center(
+        child: Text(
+          'No chats found',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: chats.length,
+      itemBuilder: (context, index) {
+        final chat = chats[index];
+        final chatId = _asInt(chat['id']);
+        if (chatId == null) return const SizedBox.shrink();
+        final selected = _activeChatId == chatId;
+        final title = chat['title']?.toString() ?? 'Untitled';
+        final preview = chat['last_message_preview']?.toString() ??
+            chat['description']?.toString() ??
+            'No messages yet';
+        final unread = _asInt(chat['unread_count']) ?? 0;
+        final timeText = _formatLastTime(chat['last_message_at']);
+        final avatarText = title.isNotEmpty ? title[0].toUpperCase() : '?';
+
+        return InkWell(
+          onTap: () => _loadMessages(chatId),
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            decoration: BoxDecoration(
+              color: selected ? const Color(0xFFEAF4F8) : Colors.transparent,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 22,
+                  backgroundColor: const Color(0xFFD7E8EE),
+                  child: Text(
+                    avatarText,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: const Color(0xFF2F6D84),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (timeText.isNotEmpty)
+                            Text(
+                              timeText,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        preview,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (unread > 0) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2F6D84),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      unread > 99 ? '99+' : '$unread',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildThread(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      children: [
+        Expanded(
+          child: _activeChatId == null
+              ? Center(
+                  child: Text(
+                    'Select a chat to view messages',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              : _messages.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No messages yet',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        final msg = _messages[index];
+                        final content = msg['content']?.toString() ?? '';
+                        final senderId = msg['sender_id']?.toString() ?? '';
+                        final status = msg['status']?.toString() ?? '';
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF6FAFC),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: const Color(0xFFE0EBEF)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(content),
+                              const SizedBox(height: 4),
+                              Text(
+                                'sender $senderId${status.isNotEmpty ? ' • $status' : ''}',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _messageController,
+                decoration: const InputDecoration(labelText: 'Message'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: _sendMessage,
+              icon: const Icon(Icons.send_rounded),
+              label: const Text('Send'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.all(4),
       child: Column(
         children: [
+          _SectionCard(
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _chatSearchController,
+                    onChanged: (value) => setState(() => _chatQuery = value),
+                    decoration: const InputDecoration(
+                      labelText: 'Search chats',
+                      prefixIcon: Icon(Icons.search),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _loadChats,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Reload'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
           _SectionCard(
             child: Wrap(
               spacing: 8,
@@ -1014,8 +1532,27 @@ class _ChatsPageState extends State<ChatsPage> {
                 SizedBox(
                   width: 220,
                   child: TextField(
+                    controller: _uidSearchController,
+                    decoration: const InputDecoration(labelText: 'Find by UID (@uid)'),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _uidLookupLoading ? null : _findUserByUid,
+                  icon: const Icon(Icons.person_search),
+                  label: const Text('Find'),
+                ),
+                if (_uidResult != null)
+                  OutlinedButton.icon(
+                    onPressed: _startPrivateFromUid,
+                    icon: const Icon(Icons.chat_bubble_outline),
+                    label: Text('Chat with ${_uidResult!['username']}'),
+                  ),
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 220,
+                  child: TextField(
                     controller: _newChatController,
-                    decoration: const InputDecoration(labelText: 'Chat title'),
+                    decoration: const InputDecoration(labelText: 'Group title'),
                   ),
                 ),
                 SizedBox(
@@ -1027,122 +1564,58 @@ class _ChatsPageState extends State<ChatsPage> {
                 ),
                 FilledButton.icon(
                   onPressed: _createChat,
-                  icon: const Icon(Icons.add_comment_outlined),
-                  label: const Text('Create'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _loadChats,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Refresh'),
+                  icon: const Icon(Icons.group_add_outlined),
+                  label: const Text('Create group'),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 10),
-          _SectionCard(
-            child: SizedBox(
-              height: 56,
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : _chats.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No chats yet. Create the first one.',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        )
-                      : ListView(
-                          scrollDirection: Axis.horizontal,
-                          children: _chats.map((chat) {
-                            final id = _asInt(chat['id']);
-                            if (id == null) return const SizedBox.shrink();
-                            return Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ChoiceChip(
-                                label: Text('${chat['title']} (${chat['type']})'),
-                                selected: _activeChatId == id,
-                                onSelected: (_) => _loadMessages(id),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-            ),
-          ),
-          const SizedBox(height: 10),
           Expanded(
-            child: _SectionCard(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                children: [
-                  Expanded(
-                    child: _activeChatId == null
-                        ? Center(
-                            child: Text(
-                              'Select a chat to view messages',
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          )
-                        : _messages.isEmpty
-                            ? Center(
-                                child: Text(
-                                  'No messages yet',
-                                  style: theme.textTheme.bodyMedium?.copyWith(
-                                    color: theme.colorScheme.onSurfaceVariant,
-                                  ),
-                                ),
-                              )
-                            : ListView.builder(
-                                itemCount: _messages.length,
-                                itemBuilder: (context, index) {
-                                  final msg = _messages[index];
-                                  return Container(
-                                    margin: const EdgeInsets.only(bottom: 8),
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFF6FAFC),
-                                      borderRadius: BorderRadius.circular(14),
-                                      border: Border.all(color: const Color(0xFFE0EBEF)),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(msg['content']?.toString() ?? ''),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          'sender ${msg['sender_id']}',
-                                          style: theme.textTheme.bodySmall?.copyWith(
-                                            color: theme.colorScheme.onSurfaceVariant,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth >= 900;
+                if (wide) {
+                  return Row(
                     children: [
                       Expanded(
-                        child: TextField(
-                          controller: _messageController,
-                          decoration: const InputDecoration(labelText: 'Message'),
+                        flex: 4,
+                        child: _SectionCard(
+                          padding: const EdgeInsets.all(8),
+                          child: _buildChatList(context),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      FilledButton.icon(
-                        onPressed: _sendMessage,
-                        icon: const Icon(Icons.send_rounded),
-                        label: const Text('Send'),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        flex: 6,
+                        child: _SectionCard(
+                          padding: const EdgeInsets.all(10),
+                          child: _buildThread(context),
+                        ),
                       ),
                     ],
-                  ),
-                ],
-              ),
+                  );
+                }
+                return Column(
+                  children: [
+                    Expanded(
+                      flex: 5,
+                      child: _SectionCard(
+                        padding: const EdgeInsets.all(8),
+                        child: _buildChatList(context),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Expanded(
+                      flex: 6,
+                      child: _SectionCard(
+                        padding: const EdgeInsets.all(10),
+                        child: _buildThread(context),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         ],
@@ -1313,10 +1786,14 @@ class CustomizationPage extends StatefulWidget {
 }
 
 class _CustomizationPageState extends State<CustomizationPage> {
+  final _uidController = TextEditingController();
   final _themeController = TextEditingController();
   final _accentController = TextEditingController();
   bool _loading = false;
   Map<String, dynamic>? _settings;
+  bool _autoUpdateCheck = true;
+  bool _updateNotifications = true;
+  String _updateChannel = 'stable';
 
   @override
   void initState() {
@@ -1326,6 +1803,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
 
   @override
   void dispose() {
+    _uidController.dispose();
     _themeController.dispose();
     _accentController.dispose();
     super.dispose();
@@ -1335,9 +1813,17 @@ class _CustomizationPageState extends State<CustomizationPage> {
     setState(() => _loading = true);
     try {
       final settings = await widget.api.customization();
+      final me = await widget.api.me();
+      final prefs = await SharedPreferences.getInstance();
+      _uidController.text = me['uid']?.toString() ?? '';
       _themeController.text = settings['theme']?.toString() ?? '';
       _accentController.text = settings['accent_color']?.toString() ?? '';
-      setState(() => _settings = settings);
+      setState(() {
+        _settings = settings;
+        _autoUpdateCheck = prefs.getBool(kPrefAutoUpdateCheck) ?? true;
+        _updateNotifications = prefs.getBool(kPrefUpdateNotifications) ?? true;
+        _updateChannel = prefs.getString(kPrefUpdateChannel) ?? 'stable';
+      });
     } catch (error) {
       _show(error);
     } finally {
@@ -1348,10 +1834,18 @@ class _CustomizationPageState extends State<CustomizationPage> {
   Future<void> _save() async {
     setState(() => _loading = true);
     try {
+      final uid = _uidController.text.trim();
+      if (uid.isNotEmpty) {
+        await widget.api.updateProfile(uid: uid);
+      }
       final saved = await widget.api.updateCustomization(
         theme: _themeController.text.trim(),
         accentColor: _accentController.text.trim(),
       );
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kPrefAutoUpdateCheck, _autoUpdateCheck);
+      await prefs.setBool(kPrefUpdateNotifications, _updateNotifications);
+      await prefs.setString(kPrefUpdateChannel, _updateChannel);
       setState(() => _settings = saved);
       _show('Saved');
     } catch (error) {
@@ -1382,6 +1876,13 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       TextField(
+                        controller: _uidController,
+                        decoration: const InputDecoration(
+                          labelText: 'UID (findable ID, example: astra_link01)',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
                         controller: _themeController,
                         decoration: const InputDecoration(labelText: 'Theme name'),
                       ),
@@ -1407,6 +1908,52 @@ class _CustomizationPageState extends State<CustomizationPage> {
                             label: const Text('Reload'),
                           ),
                         ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _SectionCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Updates',
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String>(
+                        initialValue: _updateChannel,
+                        decoration: const InputDecoration(labelText: 'Update channel'),
+                        items: const [
+                          DropdownMenuItem(value: 'stable', child: Text('stable')),
+                          DropdownMenuItem(value: 'beta', child: Text('beta')),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _updateChannel = value);
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Auto-check updates on startup'),
+                        value: _autoUpdateCheck,
+                        onChanged: (value) => setState(() => _autoUpdateCheck = value),
+                      ),
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Show update notifications'),
+                        value: _updateNotifications,
+                        onChanged: (value) => setState(() => _updateNotifications = value),
+                      ),
+                      Text(
+                        'To check immediately, use the refresh icon in the top bar.',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ],
                   ),
