@@ -1,3 +1,4 @@
+﻿import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -7,19 +8,29 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+const String _productionBaseUrl = String.fromEnvironment(
+  'ASTRALINK_API_BASE_URL',
+  defaultValue: 'https://volds.ru',
+);
+
+const Set<String> _legacyLocalBaseUrls = {
+  'http://127.0.0.1:8000',
+  'http://localhost:8000',
+  'http://10.0.2.2:8000',
+  'https://127.0.0.1:8000',
+};
+
 void main() {
   runApp(const AstraLinkApp());
 }
 
-String inferDefaultBaseUrl() {
-  if (kIsWeb) {
-    return 'http://127.0.0.1:8000';
-  }
-  if (defaultTargetPlatform == TargetPlatform.android) {
-    return 'http://10.0.2.2:8000';
-  }
-  return 'http://127.0.0.1:8000';
+String normalizeBaseUrl(String input) {
+  final trimmed = input.trim();
+  if (trimmed.isEmpty) return _productionBaseUrl;
+  return trimmed.endsWith('/') ? trimmed.substring(0, trimmed.length - 1) : trimmed;
 }
+
+String inferDefaultBaseUrl() => normalizeBaseUrl(_productionBaseUrl);
 
 String runtimePlatformKey() {
   if (kIsWeb) return 'web';
@@ -31,6 +42,13 @@ String runtimePlatformKey() {
     default:
       return 'web';
   }
+}
+
+int? _asInt(dynamic value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value);
+  return null;
 }
 
 List<int> _normalizeVersion(String version) {
@@ -52,6 +70,90 @@ bool isVersionNewer(String candidate, String current) {
     if (c1[i] < c2[i]) return false;
   }
   return false;
+}
+
+ThemeData _buildTheme() {
+  final scheme = ColorScheme.fromSeed(
+    seedColor: const Color(0xFF2F6D84),
+    brightness: Brightness.light,
+  ).copyWith(
+    primary: const Color(0xFF2F6D84),
+    secondary: const Color(0xFF5C8798),
+    tertiary: const Color(0xFF6F8B7F),
+    surface: const Color(0xFFF2F6F8),
+    outline: const Color(0xFF9FB0B8),
+  );
+
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: const Color(0xFFEDF3F6),
+    appBarTheme: AppBarTheme(
+      backgroundColor: Colors.transparent,
+      foregroundColor: scheme.onSurface,
+      elevation: 0,
+      centerTitle: false,
+      surfaceTintColor: Colors.transparent,
+    ),
+    cardTheme: CardTheme(
+      color: Colors.white,
+      elevation: 0,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: const BorderSide(color: Color(0xFFE2EAED)),
+      ),
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: const Color(0xFFF7FAFB),
+      labelStyle: TextStyle(color: scheme.onSurfaceVariant),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: scheme.outline.withOpacity(0.35)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: scheme.outline.withOpacity(0.3)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: scheme.primary, width: 1.4),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        backgroundColor: scheme.primary,
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        foregroundColor: scheme.primary,
+        side: BorderSide(color: scheme.primary.withOpacity(0.3)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      backgroundColor: Colors.white,
+      indicatorColor: scheme.primary.withOpacity(0.16),
+      labelTextStyle: MaterialStateProperty.resolveWith((states) {
+        final selected = states.contains(MaterialState.selected);
+        return TextStyle(
+          fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+          color: selected ? scheme.primary : scheme.onSurfaceVariant,
+        );
+      }),
+    ),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ),
+  );
 }
 
 class AstraLinkApp extends StatefulWidget {
@@ -77,16 +179,26 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
 
   Future<void> _loadSession() async {
     final prefs = await SharedPreferences.getInstance();
+    final storedRaw = prefs.getString(_baseUrlKey);
+    final stored = normalizeBaseUrl(storedRaw ?? '');
+    final migratedBase = storedRaw == null || _legacyLocalBaseUrls.contains(stored)
+        ? inferDefaultBaseUrl()
+        : stored;
+
+    if (storedRaw == null || stored != migratedBase) {
+      await prefs.setString(_baseUrlKey, migratedBase);
+    }
+
     setState(() {
       _token = prefs.getString(_tokenKey);
-      _baseUrl = prefs.getString(_baseUrlKey) ?? inferDefaultBaseUrl();
+      _baseUrl = migratedBase;
       _loading = false;
     });
   }
 
   Future<void> _saveSession({required String baseUrl, String? token}) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_baseUrlKey, baseUrl);
+    await prefs.setString(_baseUrlKey, normalizeBaseUrl(baseUrl));
     if (token == null) {
       await prefs.remove(_tokenKey);
     } else {
@@ -94,11 +206,10 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
     }
   }
 
-  Future<void> _onAuthenticated(String token, String baseUrl) async {
-    await _saveSession(baseUrl: baseUrl, token: token);
+  Future<void> _onAuthenticated(String token) async {
+    await _saveSession(baseUrl: _baseUrl, token: token);
     setState(() {
       _token = token;
-      _baseUrl = baseUrl;
     });
   }
 
@@ -109,37 +220,28 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
     });
   }
 
-  Future<void> _onUpdateBaseUrl(String newBaseUrl) async {
-    await _saveSession(baseUrl: newBaseUrl, token: _token);
-    setState(() {
-      _baseUrl = newBaseUrl;
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const MaterialApp(
-        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+      return MaterialApp(
+        theme: _buildTheme(),
+        home: const Scaffold(body: Center(child: CircularProgressIndicator())),
       );
     }
 
     return MaterialApp(
       title: 'AstraLink',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFFA5E2F)),
-        useMaterial3: true,
-      ),
+      debugShowCheckedModeBanner: false,
+      theme: _buildTheme(),
       home: _token == null
           ? AuthScreen(
-              initialBaseUrl: _baseUrl,
+              baseUrl: _baseUrl,
               onAuthenticated: _onAuthenticated,
             )
           : HomeScreen(
               token: _token!,
               baseUrl: _baseUrl,
               onLogout: _onLogout,
-              onUpdateBaseUrl: _onUpdateBaseUrl,
             ),
     );
   }
@@ -151,7 +253,6 @@ class ApiException implements Exception {
   @override
   String toString() => message;
 }
-
 class ApiClient {
   final String baseUrl;
   final String? token;
@@ -179,32 +280,56 @@ class ApiClient {
     final uri = Uri.parse('$_safeBase$path');
     late http.Response response;
 
-    switch (method) {
-      case 'GET':
-        response = await http.get(uri, headers: _headers(withAuth: withAuth));
-      case 'POST':
-        response = await http.post(
-          uri,
-          headers: _headers(withAuth: withAuth),
-          body: body == null ? null : jsonEncode(body),
-        );
-      case 'PATCH':
-        response = await http.patch(
-          uri,
-          headers: _headers(withAuth: withAuth),
-          body: body == null ? null : jsonEncode(body),
-        );
-      case 'PUT':
-        response = await http.put(
-          uri,
-          headers: _headers(withAuth: withAuth),
-          body: body == null ? null : jsonEncode(body),
-        );
-      default:
-        throw ApiException('Unsupported method: $method');
+    try {
+      switch (method) {
+        case 'GET':
+          response = await http
+              .get(uri, headers: _headers(withAuth: withAuth))
+              .timeout(const Duration(seconds: 25));
+          break;
+        case 'POST':
+          response = await http
+              .post(
+                uri,
+                headers: _headers(withAuth: withAuth),
+                body: body == null ? null : jsonEncode(body),
+              )
+              .timeout(const Duration(seconds: 25));
+          break;
+        case 'PATCH':
+          response = await http
+              .patch(
+                uri,
+                headers: _headers(withAuth: withAuth),
+                body: body == null ? null : jsonEncode(body),
+              )
+              .timeout(const Duration(seconds: 25));
+          break;
+        case 'PUT':
+          response = await http
+              .put(
+                uri,
+                headers: _headers(withAuth: withAuth),
+                body: body == null ? null : jsonEncode(body),
+              )
+              .timeout(const Duration(seconds: 25));
+          break;
+        default:
+          throw ApiException('Unsupported method: $method');
+      }
+    } on TimeoutException {
+      throw ApiException('Connection timeout. Check internet or server status.');
     }
 
-    final decoded = response.body.isEmpty ? null : jsonDecode(response.body);
+    dynamic decoded;
+    if (response.body.isNotEmpty) {
+      try {
+        decoded = jsonDecode(response.body);
+      } catch (_) {
+        throw ApiException('Invalid JSON response from server');
+      }
+    }
+
     if (response.statusCode >= 400) {
       if (decoded is Map<String, dynamic> && decoded['detail'] != null) {
         throw ApiException(decoded['detail'].toString());
@@ -338,14 +463,13 @@ class ApiClient {
     }
   }
 }
-
 class AuthScreen extends StatefulWidget {
-  final String initialBaseUrl;
-  final Future<void> Function(String token, String baseUrl) onAuthenticated;
+  final String baseUrl;
+  final Future<void> Function(String token) onAuthenticated;
 
   const AuthScreen({
     super.key,
-    required this.initialBaseUrl,
+    required this.baseUrl,
     required this.onAuthenticated,
   });
 
@@ -354,7 +478,6 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  final _baseController = TextEditingController();
   final _loginController = TextEditingController();
   final _passwordController = TextEditingController();
   final _regUserController = TextEditingController();
@@ -364,14 +487,7 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _loading = false;
 
   @override
-  void initState() {
-    super.initState();
-    _baseController.text = widget.initialBaseUrl;
-  }
-
-  @override
   void dispose() {
-    _baseController.dispose();
     _loginController.dispose();
     _passwordController.dispose();
     _regUserController.dispose();
@@ -385,13 +501,13 @@ class _AuthScreenState extends State<AuthScreen> {
   ) async {
     setState(() => _loading = true);
     try {
-      final client = ApiClient(baseUrl: _baseController.text.trim());
+      final client = ApiClient(baseUrl: widget.baseUrl);
       final response = await action(client);
       final token = response['access_token']?.toString();
       if (token == null || token.isEmpty) {
         throw ApiException('Token not received');
       }
-      await widget.onAuthenticated(token, _baseController.text.trim());
+      await widget.onAuthenticated(token);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -406,127 +522,194 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final host = Uri.tryParse(widget.baseUrl)?.host ?? widget.baseUrl;
+
     return DefaultTabController(
       length: 2,
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('AstraLink Sign In'),
-          bottom: const TabBar(
-            tabs: [
-              Tab(text: 'Login'),
-              Tab(text: 'Register'),
-            ],
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFFE7EEF2), Color(0xFFF5F8FA)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
           ),
-        ),
-        body: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    TextField(
-                      controller: _baseController,
-                      decoration: const InputDecoration(
-                        labelText: 'API Base URL',
-                        helperText:
-                            'Windows/Web: http://127.0.0.1:8000, Android emulator: http://10.0.2.2:8000',
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Expanded(
-                      child: TabBarView(
+          child: SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 540),
+                  child: Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          ListView(
+                          Row(
                             children: [
-                              TextField(
-                                controller: _loginController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Username or email',
+                              Container(
+                                width: 48,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primary.withOpacity(0.14),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Icon(
+                                  Icons.bolt_rounded,
+                                  color: theme.colorScheme.primary,
                                 ),
                               ),
-                              const SizedBox(height: 12),
-                              TextField(
-                                controller: _passwordController,
-                                obscureText: true,
-                                decoration: const InputDecoration(
-                                  labelText: 'Password',
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                              FilledButton(
-                                onPressed: () {
-                                  _run(
-                                    (client) => client.login(
-                                      _loginController.text.trim(),
-                                      _passwordController.text.trim(),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'AstraLink',
+                                      style: theme.textTheme.headlineSmall?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                      ),
                                     ),
-                                  );
-                                },
-                                child: const Text('Login'),
+                                    Text(
+                                      'Messenger + social network',
+                                      style: theme.textTheme.bodyMedium?.copyWith(
+                                        color: theme.colorScheme.onSurfaceVariant,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ],
                           ),
-                          ListView(
-                            children: [
-                              TextField(
-                                controller: _regUserController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Username',
+                          const SizedBox(height: 16),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF4F8FA),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFFDCE8ED)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.cloud_done_outlined, size: 18),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Server: $host',
+                                    style: theme.textTheme.bodyMedium,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 12),
-                              TextField(
-                                controller: _regEmailController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Email',
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              TextField(
-                                controller: _regPasswordController,
-                                obscureText: true,
-                                decoration: const InputDecoration(
-                                  labelText: 'Password',
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                              FilledButton(
-                                onPressed: () {
-                                  _run(
-                                    (client) => client.register(
-                                      _regUserController.text.trim(),
-                                      _regEmailController.text.trim(),
-                                      _regPasswordController.text.trim(),
-                                    ),
-                                  );
-                                },
-                                child: const Text('Create account'),
-                              ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          const TabBar(
+                            tabs: [
+                              Tab(text: 'Login'),
+                              Tab(text: 'Register'),
                             ],
+                          ),
+                          const SizedBox(height: 14),
+                          SizedBox(
+                            height: 320,
+                            child: _loading
+                                ? const Center(child: CircularProgressIndicator())
+                                : TabBarView(
+                                    children: [
+                                      ListView(
+                                        children: [
+                                          TextField(
+                                            controller: _loginController,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Username or email',
+                                            ),
+                                          ),
+                                          const SizedBox(height: 12),
+                                          TextField(
+                                            controller: _passwordController,
+                                            obscureText: true,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Password',
+                                            ),
+                                          ),
+                                          const SizedBox(height: 16),
+                                          FilledButton.icon(
+                                            onPressed: () {
+                                              _run(
+                                                (client) => client.login(
+                                                  _loginController.text.trim(),
+                                                  _passwordController.text.trim(),
+                                                ),
+                                              );
+                                            },
+                                            icon: const Icon(Icons.login),
+                                            label: const Text('Login'),
+                                          ),
+                                        ],
+                                      ),
+                                      ListView(
+                                        children: [
+                                          TextField(
+                                            controller: _regUserController,
+                                            decoration: const InputDecoration(labelText: 'Username'),
+                                          ),
+                                          const SizedBox(height: 12),
+                                          TextField(
+                                            controller: _regEmailController,
+                                            keyboardType: TextInputType.emailAddress,
+                                            decoration: const InputDecoration(labelText: 'Email'),
+                                          ),
+                                          const SizedBox(height: 12),
+                                          TextField(
+                                            controller: _regPasswordController,
+                                            obscureText: true,
+                                            decoration: const InputDecoration(labelText: 'Password'),
+                                          ),
+                                          const SizedBox(height: 16),
+                                          FilledButton.icon(
+                                            onPressed: () {
+                                              _run(
+                                                (client) => client.register(
+                                                  _regUserController.text.trim(),
+                                                  _regEmailController.text.trim(),
+                                                  _regPasswordController.text.trim(),
+                                                ),
+                                              );
+                                            },
+                                            icon: const Icon(Icons.person_add_alt_1),
+                                            label: const Text('Create account'),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
                           ),
                         ],
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
+            ),
+          ),
+        ),
       ),
     );
   }
 }
-
 class HomeScreen extends StatefulWidget {
   final String token;
   final String baseUrl;
   final Future<void> Function() onLogout;
-  final Future<void> Function(String newBaseUrl) onUpdateBaseUrl;
 
   const HomeScreen({
     super.key,
     required this.token,
     required this.baseUrl,
     required this.onLogout,
-    required this.onUpdateBaseUrl,
   });
 
   @override
@@ -536,11 +719,16 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late ApiClient _api;
   int _tab = 0;
-  String _identity = 'Loading...';
+  String _identity = 'Connecting...';
   Map<String, dynamic>? _availableRelease;
   String? _currentVersion;
   bool _checkingUpdates = false;
   bool _dialogShown = false;
+
+  String get _serverLabel {
+    final uri = Uri.tryParse(widget.baseUrl);
+    return uri?.host.isNotEmpty == true ? uri!.host : widget.baseUrl;
+  }
 
   @override
   void initState() {
@@ -553,49 +741,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadIdentity() async {
     try {
       final me = await _api.me();
+      final id = _asInt(me['id']);
+      final username = me['username']?.toString() ?? 'User';
       setState(() {
-        _identity = '${me['username']} (#${me['id']})';
+        _identity = id == null ? username : '$username (#$id)';
       });
     } catch (_) {
       setState(() {
         _identity = 'Unauthorized';
       });
     }
-  }
-
-  Future<void> _changeBaseUrlDialog() async {
-    final controller = TextEditingController(text: widget.baseUrl);
-    final value = await showDialog<String>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('API Base URL'),
-          content: TextField(
-            controller: controller,
-            decoration: const InputDecoration(
-              labelText: 'http://127.0.0.1:8000',
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, controller.text.trim()),
-              child: const Text('Apply'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (value == null || value.isEmpty) return;
-    await widget.onUpdateBaseUrl(value);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Restart app to switch API base URL')),
-    );
   }
 
   Future<void> _checkForUpdates() async {
@@ -627,7 +782,7 @@ class _HomeScreenState extends State<HomeScreen> {
         await _showUpdateDialog();
       }
     } catch (_) {
-      // Update check should not block app usage.
+      // Ignore update checks in background.
     } finally {
       if (mounted) {
         setState(() => _checkingUpdates = false);
@@ -691,9 +846,11 @@ class _HomeScreenState extends State<HomeScreen> {
       CustomizationPage(api: _api),
     ];
 
+    final theme = Theme.of(context);
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('AstraLink - $_identity'),
+        title: const Text('AstraLink'),
         actions: [
           if (_checkingUpdates)
             const Padding(
@@ -710,13 +867,8 @@ class _HomeScreenState extends State<HomeScreen> {
             IconButton(
               tooltip: 'Update available',
               onPressed: _showUpdateDialog,
-              icon: const Icon(Icons.system_update),
+              icon: const Icon(Icons.system_update_alt_rounded),
             ),
-          IconButton(
-            tooltip: 'API URL',
-            onPressed: _changeBaseUrlDialog,
-            icon: const Icon(Icons.dns),
-          ),
           IconButton(
             tooltip: 'Logout',
             onPressed: widget.onLogout,
@@ -724,23 +876,76 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: pages[_tab],
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: Column(
+            children: [
+              _SectionCard(
+                child: Row(
+                  children: [
+                    Icon(Icons.verified_user_outlined, color: theme.colorScheme.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _identity,
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        _serverLabel,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: theme.colorScheme.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: IndexedStack(
+                  index: _tab,
+                  children: pages,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (index) => setState(() => _tab = index),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.chat_bubble_outline),
+            selectedIcon: Icon(Icons.chat_bubble),
             label: 'Chats',
           ),
-          NavigationDestination(icon: Icon(Icons.rss_feed), label: 'Feed'),
-          NavigationDestination(icon: Icon(Icons.tune), label: 'Theme'),
+          NavigationDestination(
+            icon: Icon(Icons.rss_feed_outlined),
+            selectedIcon: Icon(Icons.rss_feed),
+            label: 'Feed',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.palette_outlined),
+            selectedIcon: Icon(Icons.palette),
+            label: 'Theme',
+          ),
         ],
       ),
     );
   }
 }
-
 class ChatsPage extends StatefulWidget {
   final ApiClient api;
   const ChatsPage({super.key, required this.api});
@@ -843,103 +1048,156 @@ class _ChatsPageState extends State<ChatsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(4),
       child: Column(
         children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              SizedBox(
-                width: 220,
-                child: TextField(
-                  controller: _newChatController,
-                  decoration: const InputDecoration(
-                    labelText: 'New chat title',
+          _SectionCard(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                SizedBox(
+                  width: 220,
+                  child: TextField(
+                    controller: _newChatController,
+                    decoration: const InputDecoration(labelText: 'Chat title'),
                   ),
                 ),
-              ),
-              SizedBox(
-                width: 220,
-                child: TextField(
-                  controller: _newMembersController,
-                  decoration: const InputDecoration(
-                    labelText: 'Member IDs (2,3)',
+                SizedBox(
+                  width: 220,
+                  child: TextField(
+                    controller: _newMembersController,
+                    decoration: const InputDecoration(labelText: 'Member IDs (2,3)'),
                   ),
                 ),
-              ),
-              FilledButton(onPressed: _createChat, child: const Text('Create')),
-              OutlinedButton(
-                onPressed: _loadChats,
-                child: const Text('Refresh'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            height: 48,
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView(
-                    scrollDirection: Axis.horizontal,
-                    children: _chats.map((chat) {
-                      final id = chat['id'] as int;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text('${chat['title']} (${chat['type']})'),
-                          selected: _activeChatId == id,
-                          onSelected: (_) => _loadMessages(id),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-          ),
-          const SizedBox(height: 10),
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                border: Border.all(
-                  color: Theme.of(context).colorScheme.outlineVariant,
+                FilledButton.icon(
+                  onPressed: _createChat,
+                  icon: const Icon(Icons.add_comment_outlined),
+                  label: const Text('Create'),
                 ),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: ListView.builder(
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final msg = _messages[index];
-                  return Card(
-                    child: ListTile(
-                      title: Text(msg['content']?.toString() ?? ''),
-                      subtitle: Text('sender ${msg['sender_id']}'),
-                    ),
-                  );
-                },
-              ),
+                OutlinedButton.icon(
+                  onPressed: _loadChats,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Refresh'),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _messageController,
-                  decoration: const InputDecoration(labelText: 'Message'),
-                ),
+          _SectionCard(
+            child: SizedBox(
+              height: 56,
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _chats.isEmpty
+                      ? Center(
+                          child: Text(
+                            'No chats yet. Create the first one.',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        )
+                      : ListView(
+                          scrollDirection: Axis.horizontal,
+                          children: _chats.map((chat) {
+                            final id = _asInt(chat['id']);
+                            if (id == null) return const SizedBox.shrink();
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                label: Text('${chat['title']} (${chat['type']})'),
+                                selected: _activeChatId == id,
+                                onSelected: (_) => _loadMessages(id),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Expanded(
+            child: _SectionCard(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                children: [
+                  Expanded(
+                    child: _activeChatId == null
+                        ? Center(
+                            child: Text(
+                              'Select a chat to view messages',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          )
+                        : _messages.isEmpty
+                            ? Center(
+                                child: Text(
+                                  'No messages yet',
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: _messages.length,
+                                itemBuilder: (context, index) {
+                                  final msg = _messages[index];
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 8),
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFF6FAFC),
+                                      borderRadius: BorderRadius.circular(14),
+                                      border: Border.all(color: const Color(0xFFE0EBEF)),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(msg['content']?.toString() ?? ''),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'sender ${msg['sender_id']}',
+                                          style: theme.textTheme.bodySmall?.copyWith(
+                                            color: theme.colorScheme.onSurfaceVariant,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _messageController,
+                          decoration: const InputDecoration(labelText: 'Message'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton.icon(
+                        onPressed: _sendMessage,
+                        icon: const Icon(Icons.send_rounded),
+                        label: const Text('Send'),
+                      ),
+                    ],
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              FilledButton(onPressed: _sendMessage, child: const Text('Send')),
-            ],
+            ),
           ),
         ],
       ),
     );
   }
 }
-
 class FeedPage extends StatefulWidget {
   final ApiClient api;
   const FeedPage({super.key, required this.api});
@@ -1000,62 +1258,93 @@ class _FeedPageState extends State<FeedPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(4),
       child: Column(
         children: [
-          TextField(
-            controller: _postController,
-            minLines: 2,
-            maxLines: 4,
-            decoration: const InputDecoration(labelText: 'New post'),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              DropdownButton<String>(
-                value: _visibility,
-                onChanged: (value) =>
-                    setState(() => _visibility = value ?? 'public'),
-                items: const [
-                  DropdownMenuItem(value: 'public', child: Text('public')),
-                  DropdownMenuItem(
-                    value: 'followers',
-                    child: Text('followers'),
-                  ),
-                  DropdownMenuItem(value: 'private', child: Text('private')),
-                ],
-              ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: _createPost,
-                child: const Text('Publish'),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton(
-                onPressed: _loadFeed,
-                child: const Text('Refresh'),
-              ),
-            ],
+          _SectionCard(
+            child: Column(
+              children: [
+                TextField(
+                  controller: _postController,
+                  minLines: 2,
+                  maxLines: 4,
+                  decoration: const InputDecoration(labelText: 'Share an update'),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    DropdownButton<String>(
+                      value: _visibility,
+                      onChanged: (value) => setState(() => _visibility = value ?? 'public'),
+                      items: const [
+                        DropdownMenuItem(value: 'public', child: Text('public')),
+                        DropdownMenuItem(value: 'followers', child: Text('followers')),
+                        DropdownMenuItem(value: 'private', child: Text('private')),
+                      ],
+                    ),
+                    const Spacer(),
+                    FilledButton.icon(
+                      onPressed: _createPost,
+                      icon: const Icon(Icons.publish),
+                      label: const Text('Publish'),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: _loadFeed,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Refresh'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 10),
           Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    itemCount: _feed.length,
-                    itemBuilder: (context, index) {
-                      final post = _feed[index];
-                      return Card(
-                        child: ListTile(
-                          title: Text(post['content']?.toString() ?? ''),
-                          subtitle: Text(
-                            'author ${post['author_id']} - ${post['visibility']}',
+            child: _SectionCard(
+              padding: const EdgeInsets.all(10),
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _feed.isEmpty
+                      ? Center(
+                          child: Text(
+                            'Feed is empty',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
                           ),
+                        )
+                      : ListView.builder(
+                          itemCount: _feed.length,
+                          itemBuilder: (context, index) {
+                            final post = _feed[index];
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF6FAFC),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: const Color(0xFFE0EBEF)),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(post['content']?.toString() ?? ''),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'author ${post['author_id']} • ${post['visibility']}',
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
-                  ),
+            ),
           ),
         ],
       ),
@@ -1129,41 +1418,88 @@ class _CustomizationPageState extends State<CustomizationPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(4),
       child: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               children: [
-                TextField(
-                  controller: _themeController,
-                  decoration: const InputDecoration(labelText: 'Theme name'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _accentController,
-                  decoration: const InputDecoration(
-                    labelText: 'Accent color (#FF4D00)',
+                _SectionCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: _themeController,
+                        decoration: const InputDecoration(labelText: 'Theme name'),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _accentController,
+                        decoration: const InputDecoration(
+                          labelText: 'Accent color (#2F6D84)',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          FilledButton.icon(
+                            onPressed: _save,
+                            icon: const Icon(Icons.save_outlined),
+                            label: const Text('Save'),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: _load,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Reload'),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    FilledButton(onPressed: _save, child: const Text('Save')),
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: _load,
-                      child: const Text('Reload'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                SelectableText(
-                  const JsonEncoder.withIndent('  ').convert(_settings ?? {}),
-                  style: Theme.of(context).textTheme.bodySmall,
+                const SizedBox(height: 10),
+                _SectionCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Current profile settings',
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 8),
+                      SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(_settings ?? {}),
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
     );
   }
 }
+
+class _SectionCard extends StatelessWidget {
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+
+  const _SectionCard({
+    required this.child,
+    this.padding = const EdgeInsets.all(12),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: padding,
+        child: child,
+      ),
+    );
+  }
+}
+
+
