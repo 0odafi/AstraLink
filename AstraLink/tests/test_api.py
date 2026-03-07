@@ -112,6 +112,13 @@ def test_phase1_message_lifecycle_cursor_and_statuses(client):
     first_id = first_message["id"]
     assert first_message["status"] == "delivered"
 
+    bob_chats = client.get("/api/chats", headers=bob_headers)
+    assert bob_chats.status_code == 200, bob_chats.text
+    bob_chat = next((row for row in bob_chats.json() if row["id"] == chat_id), None)
+    assert bob_chat is not None
+    assert bob_chat["last_message_preview"] == "First message"
+    assert bob_chat["unread_count"] >= 1
+
     bob_page = client.get(
         f"/api/chats/{chat_id}/messages/cursor",
         headers=bob_headers,
