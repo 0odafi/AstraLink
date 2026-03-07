@@ -1,0 +1,25 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_db
+from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
+from app.services.auth_service import authenticate_user, build_token_response, register_user
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    try:
+        user = register_user(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return build_token_response(user)
+
+
+@router.post("/login", response_model=TokenResponse)
+def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    user = authenticate_user(db, login=payload.login, password=payload.password)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid login or password")
+    return build_token_response(user)

@@ -1,0 +1,16 @@
+[Unit]
+Description=AstraLink FastAPI
+After=network.target
+
+[Service]
+Type=simple
+User=astralink
+Group=astralink
+WorkingDirectory=/opt/astralink/app
+EnvironmentFile=/etc/astralink/api.env
+ExecStart=/opt/astralink/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

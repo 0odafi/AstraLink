@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-03-07T00:00:00Z",
+  "channels": {
+    "stable": {
+      "windows": {
+        "latest_version": "1.0.0+1",
+        "minimum_supported_version": "1.0.0+1",
+        "mandatory": false,
+        "download_url": "https://your-server.example/astralink/windows/1.0.0+1/astralink_windows_1.0.0_1.zip",
+        "notes": "Initial Windows release."
+      },
+      "android": {
+        "latest_version": "1.0.0+1",
+        "minimum_supported_version": "1.0.0+1",
+        "mandatory": false,
+        "download_url": "https://your-server.example/astralink/android/1.0.0+1/app-release.apk",
+        "notes": "Initial Android release."
+      }
+    }
+  }
+}
