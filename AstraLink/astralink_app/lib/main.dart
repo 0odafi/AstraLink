@@ -95,7 +95,7 @@ ThemeData _buildTheme() {
       centerTitle: false,
       surfaceTintColor: Colors.transparent,
     ),
-    cardTheme: CardTheme(
+    cardTheme: CardThemeData(
       color: Colors.white,
       elevation: 0,
       surfaceTintColor: Colors.transparent,
