@@ -95,12 +95,17 @@ jobs:
       - run: flutter pub get
       - run: flutter build apk --release --verbose
       - run: flutter build appbundle --release --verbose
+      - name: Collect Android artifacts
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/app-release.apk
+          cp build/app/outputs/bundle/release/app-release.aab dist/app-release.aab
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
           path: |
-            AstraLink/astralink_app/build/app/outputs/flutter-apk/app-release.apk
-            AstraLink/astralink_app/build/app/outputs/bundle/release/app-release.aab
+            AstraLink/astralink_app/dist/app-release.apk
+            AstraLink/astralink_app/dist/app-release.aab
 
   publish:
     needs: [resolve, build_windows, build_android]
@@ -119,6 +124,7 @@ jobs:
         run: |
           VERSION="${{ needs.resolve.outputs.version }}"
           SAFE_VERSION="${{ needs.resolve.outputs.safe_version }}"
+          ls -R artifacts/android
           mkdir -p "publish/astralink/windows/$VERSION"
           mkdir -p "publish/astralink/android/$VERSION"
           cp "artifacts/windows/astralink_windows_${SAFE_VERSION}.zip" "publish/astralink/windows/$VERSION/astralink_windows_${SAFE_VERSION}.zip"
