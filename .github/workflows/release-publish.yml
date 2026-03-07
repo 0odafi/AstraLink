@@ -1,0 +1,168 @@
+name: Build And Publish Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version (e.g. 1.0.1+2)"
+        required: true
+        type: string
+      channel:
+        description: "Release channel"
+        required: true
+        default: stable
+        type: string
+      mandatory:
+        description: "Force update"
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+env:
+  FLUTTER_CHANNEL: stable
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      channel: ${{ steps.vars.outputs.channel }}
+      mandatory: ${{ steps.vars.outputs.mandatory }}
+      safe_version: ${{ steps.vars.outputs.safe_version }}
+    steps:
+      - id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            CHANNEL="${{ github.event.inputs.channel }}"
+            MANDATORY="${{ github.event.inputs.mandatory }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            CHANNEL="stable"
+            MANDATORY="false"
+          fi
+          SAFE_VERSION="${VERSION//+/_}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "mandatory=$MANDATORY" >> "$GITHUB_OUTPUT"
+          echo "safe_version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
+
+  build_windows:
+    needs: resolve
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: AstraLink/astralink_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - shell: pwsh
+        run: |
+          $version = "${{ needs.resolve.outputs.version }}"
+          $safe = "${{ needs.resolve.outputs.safe_version }}"
+          Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "../astralink_windows_$safe.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: AstraLink/astralink_windows_${{ needs.resolve.outputs.safe_version }}.zip
+
+  build_android:
+    needs: resolve
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: AstraLink/astralink_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - run: flutter build appbundle --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            AstraLink/astralink_app/build/app/outputs/flutter-apk/app-release.apk
+            AstraLink/astralink_app/build/app/outputs/bundle/release/app-release.aab
+
+  publish:
+    needs: [resolve, build_windows, build_android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: artifacts/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-release
+          path: artifacts/android
+      - name: Prepare release payload
+        run: |
+          VERSION="${{ needs.resolve.outputs.version }}"
+          SAFE_VERSION="${{ needs.resolve.outputs.safe_version }}"
+          mkdir -p "publish/astralink/windows/$VERSION"
+          mkdir -p "publish/astralink/android/$VERSION"
+          cp "artifacts/windows/astralink_windows_${SAFE_VERSION}.zip" "publish/astralink/windows/$VERSION/astralink_windows_${SAFE_VERSION}.zip"
+          cp "artifacts/android/app-release.apk" "publish/astralink/android/$VERSION/app-release.apk"
+          cp "artifacts/android/app-release.aab" "publish/astralink/android/$VERSION/app-release.aab"
+      - name: Build release manifest
+        run: |
+          VERSION="${{ needs.resolve.outputs.version }}"
+          SAFE_VERSION="${{ needs.resolve.outputs.safe_version }}"
+          CHANNEL="${{ needs.resolve.outputs.channel }}"
+          MANDATORY="${{ needs.resolve.outputs.mandatory }}"
+          MANDATORY_FLAG=""
+          if [ "$MANDATORY" = "true" ]; then
+            MANDATORY_FLAG="--mandatory"
+          fi
+          python AstraLink/scripts/update_manifest.py \
+            --manifest publish/manifest.json \
+            --platform windows \
+            --version "$VERSION" \
+            --channel "$CHANNEL" \
+            --download-url "https://volds.ru/files/astralink/windows/$VERSION/astralink_windows_${SAFE_VERSION}.zip" \
+            --notes "Windows release $VERSION" \
+            $MANDATORY_FLAG
+          python AstraLink/scripts/update_manifest.py \
+            --manifest publish/manifest.json \
+            --platform android \
+            --version "$VERSION" \
+            --channel "$CHANNEL" \
+            --download-url "https://volds.ru/files/astralink/android/$VERSION/app-release.apk" \
+            --notes "Android release $VERSION" \
+            $MANDATORY_FLAG
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+      - name: Upload release files to server
+        run: |
+          VERSION="${{ needs.resolve.outputs.version }}"
+          HOST="87.120.84.205"
+          USER="root"
+          PORT="22"
+          RELEASES_PATH="/opt/astralink/releases"
+          ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" "mkdir -p '$RELEASES_PATH/astralink/windows/$VERSION' '$RELEASES_PATH/astralink/android/$VERSION'"
+          scp -P "$PORT" -o StrictHostKeyChecking=no "publish/astralink/windows/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/windows/$VERSION/"
+          scp -P "$PORT" -o StrictHostKeyChecking=no "publish/astralink/android/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/android/$VERSION/"
+          scp -P "$PORT" -o StrictHostKeyChecking=no "publish/manifest.json" "$USER@$HOST:$RELEASES_PATH/manifest.json"
+      - name: Show summary
+        run: |
+          echo "Published version ${{ needs.resolve.outputs.version }}"
+          echo "Manifest -> https://volds.ru/files/manifest.json"
