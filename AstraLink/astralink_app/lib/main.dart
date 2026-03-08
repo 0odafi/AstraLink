@@ -81,10 +81,46 @@ bool isVersionNewer(String candidate, String current) {
   return false;
 }
 
+enum PhoneTier { compact, regular, large, tablet }
+
 extension AdaptiveUi on BuildContext {
+  Size get _uiSize => MediaQuery.sizeOf(this);
+  double get _shortestSide => _uiSize.shortestSide;
+
+  PhoneTier get phoneTier {
+    if (_shortestSide >= 600) return PhoneTier.tablet;
+    if (_shortestSide >= 430) return PhoneTier.large;
+    if (_shortestSide < 375) return PhoneTier.compact;
+    return PhoneTier.regular;
+  }
+
+  T perTier<T>({
+    required T compact,
+    required T regular,
+    required T large,
+    required T tablet,
+  }) {
+    switch (phoneTier) {
+      case PhoneTier.compact:
+        return compact;
+      case PhoneTier.regular:
+        return regular;
+      case PhoneTier.large:
+        return large;
+      case PhoneTier.tablet:
+        return tablet;
+    }
+  }
+
+  double get _tierScale {
+    return perTier(compact: 0.94, regular: 1.0, large: 1.06, tablet: 1.14);
+  }
+
   double su(double value, {double minScale = 0.88, double maxScale = 1.16}) {
-    final shortest = MediaQuery.of(this).size.shortestSide;
-    final scale = (shortest / 390).clamp(minScale, maxScale).toDouble();
+    final smoothScale = (_shortestSide / 390).clamp(0.9, 1.1).toDouble();
+    final scale = ((smoothScale * 0.7) + (_tierScale * 0.3))
+        .clamp(minScale, maxScale)
+        .toDouble();
     return value * scale;
   }
 }
@@ -2845,6 +2881,18 @@ class _ChatsPageState extends State<ChatsPage> {
     final theme = Theme.of(context);
     final chats = _visibleChats;
     double rs(double value) => context.su(value);
+    final avatarRadius = context.perTier(
+      compact: 22.0,
+      regular: 25.0,
+      large: 27.0,
+      tablet: 30.0,
+    );
+    final rowHorizontalGap = context.perTier(
+      compact: rs(10),
+      regular: rs(12),
+      large: rs(13),
+      tablet: rs(16),
+    );
 
     if (_loading && _chats.isEmpty) {
       return const Center(child: CircularProgressIndicator());
@@ -2894,7 +2942,7 @@ class _ChatsPageState extends State<ChatsPage> {
             child: Row(
               children: [
                 CircleAvatar(
-                  radius: rs(25).clamp(22, 30).toDouble(),
+                  radius: avatarRadius,
                   backgroundColor: type == 'private'
                       ? const Color(0xFF3241A8)
                       : const Color(0xFF3A2D57),
@@ -2906,7 +2954,7 @@ class _ChatsPageState extends State<ChatsPage> {
                     ),
                   ),
                 ),
-                SizedBox(width: rs(12)),
+                SizedBox(width: rowHorizontalGap),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3094,7 +3142,20 @@ class _ChatsPageState extends State<ChatsPage> {
     final onlineCount = _onlineUsers.length;
     final hasOlder = _messagesNextBeforeId != null;
     final hasUploadingDraft = _draftAttachments.any((item) => item.uploading);
-    final bubbleMaxWidth = MediaQuery.of(context).size.width * 0.78;
+    final bubbleInset = context.perTier(
+      compact: rs(24),
+      regular: rs(34),
+      large: rs(42),
+      tablet: rs(54),
+    );
+    final bubbleWidthFactor = context.perTier(
+      compact: 0.84,
+      regular: 0.78,
+      large: 0.74,
+      tablet: 0.66,
+    );
+    final bubbleMaxWidth =
+        MediaQuery.of(context).size.width * bubbleWidthFactor;
     final canSend =
         _activeChatId != null &&
         (_messageController.text.trim().isNotEmpty ||
@@ -3165,8 +3226,8 @@ class _ChatsPageState extends State<ChatsPage> {
                 child: Container(
                   margin: EdgeInsets.only(
                     bottom: rs(8),
-                    left: isOwn ? rs(34) : 0,
-                    right: isOwn ? 0 : rs(34),
+                    left: isOwn ? bubbleInset : 0,
+                    right: isOwn ? 0 : bubbleInset,
                   ),
                   padding: EdgeInsets.fromLTRB(rs(12), rs(10), rs(12), rs(8)),
                   decoration: BoxDecoration(
@@ -3548,6 +3609,18 @@ class _ChatsPageState extends State<ChatsPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     double rs(double value) => context.su(value);
+    final chatsTitleSize = context.perTier(
+      compact: 20.0,
+      regular: 22.0,
+      large: 23.0,
+      tablet: 24.0,
+    );
+    final chatsSubtitleSize = context.perTier(
+      compact: 11.0,
+      regular: 12.0,
+      large: 12.5,
+      tablet: 13.0,
+    );
     final wide = MediaQuery.of(context).size.width >= 900;
     final activeChat = _activeChat;
     final activeTitle = activeChat?['title']?.toString() ?? 'Conversation';
@@ -3596,14 +3669,14 @@ class _ChatsPageState extends State<ChatsPage> {
                     ),
                   ),
                   SizedBox(width: rs(10)),
-                  const Expanded(
+                  Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           'Chats',
                           style: TextStyle(
-                            fontSize: 22,
+                            fontSize: chatsTitleSize,
                             fontWeight: FontWeight.w800,
                             letterSpacing: -0.2,
                           ),
@@ -3612,7 +3685,7 @@ class _ChatsPageState extends State<ChatsPage> {
                           'Telegram-style inbox',
                           style: TextStyle(
                             color: Color(0xFF97A0B6),
-                            fontSize: 12,
+                            fontSize: chatsSubtitleSize,
                           ),
                         ),
                       ],
