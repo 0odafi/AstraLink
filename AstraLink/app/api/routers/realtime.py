@@ -3,9 +3,15 @@ from sqlalchemy import select
 
 from app.api.deps import get_current_user_from_raw_token
 from app.core.database import SessionLocal
-from app.models.chat import ChatMember
+from app.models.chat import ChatMember, MessageDeliveryStatus
 from app.realtime.manager import chat_manager, user_realtime_manager
-from app.services.chat_service import can_access_chat, chat_member_ids, create_message, serialize_messages
+from app.services.chat_service import (
+    can_access_chat,
+    chat_member_ids,
+    create_message,
+    serialize_messages,
+    update_message_delivery_status,
+)
 
 router = APIRouter(tags=["Realtime"])
 
@@ -52,6 +58,20 @@ async def _broadcast_user_presence(user_id: int, status: str) -> None:
                 "status": status,
             },
         )
+
+
+def _parse_ack_status(event_type: str, raw_status: object) -> MessageDeliveryStatus | None:
+    if event_type == "seen":
+        return MessageDeliveryStatus.READ
+
+    status_value = str(raw_status or "").strip().lower()
+    if not status_value:
+        return MessageDeliveryStatus.DELIVERED
+    if status_value == "delivered":
+        return MessageDeliveryStatus.DELIVERED
+    if status_value == "read":
+        return MessageDeliveryStatus.READ
+    return None
 
 
 @router.websocket("/me/ws")
@@ -107,6 +127,53 @@ async def me_socket(
                         "is_typing": is_typing,
                     },
                 )
+                continue
+
+            if event_type in {"ack", "seen"}:
+                chat_id = _as_int(incoming.get("chat_id"))
+                message_id = _as_int(incoming.get("message_id"))
+                status = _parse_ack_status(event_type, incoming.get("status"))
+                if chat_id is None or message_id is None:
+                    await websocket.send_json(
+                        {"type": "error", "message": "chat_id and message_id are required"},
+                    )
+                    continue
+                if status is None:
+                    await websocket.send_json({"type": "error", "message": "Unsupported ack status"})
+                    continue
+
+                db = SessionLocal()
+                try:
+                    if not can_access_chat(db, chat_id=chat_id, user_id=user.id):
+                        await websocket.send_json({"type": "error", "message": "Access denied"})
+                        continue
+
+                    message, user_status, sender_status, changed = update_message_delivery_status(
+                        db,
+                        message_id=message_id,
+                        user_id=user.id,
+                        status=status,
+                        chat_id=chat_id,
+                    )
+                except ValueError as exc:
+                    await websocket.send_json({"type": "error", "message": str(exc)})
+                    continue
+                finally:
+                    db.close()
+
+                if changed:
+                    await _broadcast_chat_event(
+                        message.chat_id,
+                        {
+                            "type": "message_status",
+                            "chat_id": message.chat_id,
+                            "message_id": message_id,
+                            "user_id": user.id,
+                            "status": user_status.value,
+                            "sender_id": message.sender_id,
+                            "sender_status": sender_status.value,
+                        },
+                    )
                 continue
 
             if event_type == "message":
@@ -201,6 +268,46 @@ async def chat_socket(
                     },
                     exclude_chat_socket=websocket,
                 )
+                continue
+
+            if event_type in {"ack", "seen"}:
+                message_id = _as_int(incoming.get("message_id"))
+                status = _parse_ack_status(event_type, incoming.get("status"))
+                if message_id is None:
+                    await websocket.send_json({"type": "error", "message": "message_id is required"})
+                    continue
+                if status is None:
+                    await websocket.send_json({"type": "error", "message": "Unsupported ack status"})
+                    continue
+
+                db = SessionLocal()
+                try:
+                    message, user_status, sender_status, changed = update_message_delivery_status(
+                        db,
+                        message_id=message_id,
+                        user_id=user.id,
+                        status=status,
+                        chat_id=chat_id,
+                    )
+                except ValueError as exc:
+                    await websocket.send_json({"type": "error", "message": str(exc)})
+                    continue
+                finally:
+                    db.close()
+
+                if changed:
+                    await _broadcast_chat_event(
+                        message.chat_id,
+                        {
+                            "type": "message_status",
+                            "chat_id": message.chat_id,
+                            "message_id": message_id,
+                            "user_id": user.id,
+                            "status": user_status.value,
+                            "sender_id": message.sender_id,
+                            "sender_status": sender_status.value,
+                        },
+                    )
                 continue
 
             if event_type != "message":

@@ -11,6 +11,14 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _recv_by_type(websocket, expected_type: str, max_events: int = 6):
+    for _ in range(max_events):
+        payload = websocket.receive_json()
+        if payload.get("type") == expected_type:
+            return payload
+    raise AssertionError(f"Event '{expected_type}' was not received in {max_events} frames")
+
+
 def test_auth_profile_chat_social_customization_flow(client):
     alice = _register(client, "alice", "alice@test.dev")
     bob = _register(client, "bob", "bob@test.dev")
@@ -231,6 +239,63 @@ def test_phase1_message_lifecycle_cursor_and_statuses(client):
     assert after_delete.status_code == 200, after_delete.text
     remaining_ids = {row["id"] for row in after_delete.json()}
     assert second_id not in remaining_ids
+
+
+def test_realtime_message_ack_and_seen_flow(client):
+    alice = _register(client, "ws_alice", "ws_alice@test.dev")
+    bob = _register(client, "ws_bob", "ws_bob@test.dev")
+
+    alice_headers = _auth_headers(alice["access_token"])
+    bob_headers = _auth_headers(bob["access_token"])
+
+    created_chat = client.post(
+        "/api/chats",
+        headers=alice_headers,
+        json={
+            "title": "WS status chat",
+            "description": "Realtime statuses",
+            "type": "group",
+            "member_ids": [bob["user"]["id"]],
+        },
+    )
+    assert created_chat.status_code == 201, created_chat.text
+    chat_id = created_chat.json()["id"]
+
+    sent_message = client.post(
+        f"/api/chats/{chat_id}/messages",
+        headers=alice_headers,
+        json={"content": "Status check"},
+    )
+    assert sent_message.status_code == 201, sent_message.text
+    message_id = sent_message.json()["id"]
+
+    with (
+        client.websocket_connect(f"/api/realtime/me/ws?token={alice['access_token']}") as alice_ws,
+        client.websocket_connect(f"/api/realtime/me/ws?token={bob['access_token']}") as bob_ws,
+    ):
+        assert alice_ws.receive_json()["type"] == "ready"
+        assert bob_ws.receive_json()["type"] == "ready"
+
+        bob_ws.send_json(
+            {
+                "type": "ack",
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "status": "read",
+            }
+        )
+
+        status_event = _recv_by_type(alice_ws, "message_status")
+        assert status_event["chat_id"] == chat_id
+        assert status_event["message_id"] == message_id
+        assert status_event["user_id"] == bob["user"]["id"]
+        assert status_event["status"] == "read"
+        assert status_event["sender_id"] == alice["user"]["id"]
+        assert status_event["sender_status"] == "read"
+
+    alice_messages = client.get(f"/api/chats/{chat_id}/messages", headers=alice_headers)
+    assert alice_messages.status_code == 200, alice_messages.text
+    assert alice_messages.json()[-1]["status"] == "read"
 
 
 def test_refresh_token_rotation_flow(client):

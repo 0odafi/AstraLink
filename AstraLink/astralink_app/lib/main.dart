@@ -1472,6 +1472,8 @@ class _ChatsPageState extends State<ChatsPage> {
   bool _loadingOlderMessages = false;
   final Map<int, DateTime> _typingUsers = {};
   final Set<int> _onlineUsers = {};
+  final Map<int, String> _myAckStatusByMessage = {};
+  final Map<int, String> _pendingAckStatusByMessage = {};
 
   @override
   void initState() {
@@ -1541,6 +1543,7 @@ class _ChatsPageState extends State<ChatsPage> {
     final channel = _globalChannel;
     _globalChannel = null;
     channel?.sink.close();
+    _pendingAckStatusByMessage.clear();
     if (disableState && mounted && _realtimeEnabled) {
       setState(() => _realtimeEnabled = false);
     }
@@ -1557,6 +1560,7 @@ class _ChatsPageState extends State<ChatsPage> {
 
   void _connectGlobalRealtime() {
     if (_globalChannel != null) return;
+    _pendingAckStatusByMessage.clear();
     final token = _accessToken();
     if (token == null) {
       if (mounted && _realtimeEnabled) {
@@ -1703,6 +1707,112 @@ class _ChatsPageState extends State<ChatsPage> {
     }
   }
 
+  int _deliveryRank(String status) {
+    switch (status) {
+      case 'read':
+        return 2;
+      case 'delivered':
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  void _rememberMyAckStatus(int messageId, String status) {
+    final normalized = status.trim().toLowerCase();
+    if (normalized.isEmpty) return;
+    final current = _myAckStatusByMessage[messageId];
+    if (current == null || _deliveryRank(normalized) > _deliveryRank(current)) {
+      _myAckStatusByMessage[messageId] = normalized;
+    }
+
+    final pending = _pendingAckStatusByMessage[messageId];
+    if (pending != null &&
+        _deliveryRank(normalized) >= _deliveryRank(pending)) {
+      _pendingAckStatusByMessage.remove(messageId);
+    }
+  }
+
+  void _rememberStatusesFromMessages(List<Map<String, dynamic>> items) {
+    final currentUserId = widget.currentUserId;
+    if (currentUserId == null) return;
+    for (final row in items) {
+      final messageId = _asInt(row['id']);
+      final senderId = _asInt(row['sender_id']);
+      final status = row['status']?.toString().trim().toLowerCase() ?? '';
+      if (messageId == null || senderId == null || senderId == currentUserId) {
+        continue;
+      }
+      if (status == 'delivered' || status == 'read') {
+        _rememberMyAckStatus(messageId, status);
+      }
+    }
+  }
+
+  void _sendMessageStatusAck({
+    required int chatId,
+    required int messageId,
+    required String status,
+  }) {
+    final normalized = status.trim().toLowerCase();
+    if (normalized != 'delivered' && normalized != 'read') return;
+
+    final known = _myAckStatusByMessage[messageId];
+    if (known != null && _deliveryRank(known) >= _deliveryRank(normalized)) {
+      return;
+    }
+    final pending = _pendingAckStatusByMessage[messageId];
+    if (pending != null &&
+        _deliveryRank(pending) >= _deliveryRank(normalized)) {
+      return;
+    }
+
+    final channel = _globalChannel;
+    if (channel == null) return;
+
+    try {
+      _pendingAckStatusByMessage[messageId] = normalized;
+      channel.sink.add(
+        jsonEncode({
+          'type': 'ack',
+          'chat_id': chatId,
+          'message_id': messageId,
+          'status': normalized,
+        }),
+      );
+      Future<void>.delayed(const Duration(seconds: 5), () {
+        final value = _pendingAckStatusByMessage[messageId];
+        if (value == normalized) {
+          _pendingAckStatusByMessage.remove(messageId);
+        }
+      });
+    } catch (_) {
+      if (_pendingAckStatusByMessage[messageId] == normalized) {
+        _pendingAckStatusByMessage.remove(messageId);
+      }
+    }
+  }
+
+  void _ackReadForVisibleMessages(
+    int chatId,
+    List<Map<String, dynamic>> messages,
+  ) {
+    final currentUserId = widget.currentUserId;
+    if (currentUserId == null) return;
+    for (final row in messages) {
+      final messageId = _asInt(row['id']);
+      final senderId = _asInt(row['sender_id']);
+      if (messageId == null || senderId == null || senderId == currentUserId) {
+        continue;
+      }
+      _sendMessageStatusAck(
+        chatId: chatId,
+        messageId: messageId,
+        status: 'read',
+      );
+    }
+  }
+
   void _onComposerChanged(String value) {
     final chatId = _activeChatId;
     if (chatId == null) return;
@@ -1795,9 +1905,60 @@ class _ChatsPageState extends State<ChatsPage> {
         if (messageRaw is! Map) break;
         final message = Map<String, dynamic>.from(messageRaw);
         final messageChatId = _asInt(message['chat_id']) ?? eventChatId;
+        final messageId = _asInt(message['id']);
+        final senderId = _asInt(message['sender_id']);
+        if (eventType == 'message' &&
+            messageId != null &&
+            messageChatId != null &&
+            senderId != null &&
+            senderId != widget.currentUserId) {
+          _sendMessageStatusAck(
+            chatId: messageChatId,
+            messageId: messageId,
+            status: messageChatId == _activeChatId ? 'read' : 'delivered',
+          );
+        }
         if (messageChatId != null && messageChatId == _activeChatId) {
           _upsertMessage(message);
           _scheduleActiveThreadSync(messageChatId);
+        }
+        _scheduleChatsRefresh();
+        break;
+      case 'message_status':
+        final messageId = _asInt(data['message_id']);
+        final userId = _asInt(data['user_id']);
+        final senderId = _asInt(data['sender_id']);
+        final status = data['status']?.toString().trim().toLowerCase() ?? '';
+        final senderStatus =
+            data['sender_status']?.toString().trim().toLowerCase() ?? '';
+        if (messageId == null || eventChatId == null) break;
+
+        if (userId == widget.currentUserId &&
+            (status == 'delivered' || status == 'read')) {
+          _rememberMyAckStatus(messageId, status);
+        }
+
+        final index = _messages.indexWhere((m) => _asInt(m['id']) == messageId);
+        if (index >= 0) {
+          final row = Map<String, dynamic>.from(_messages[index]);
+          final currentUserId = widget.currentUserId;
+          if (currentUserId != null && senderId == currentUserId) {
+            if (senderStatus.isNotEmpty) {
+              row['status'] = senderStatus;
+            }
+          } else if (currentUserId != null &&
+              userId == currentUserId &&
+              status.isNotEmpty) {
+            row['status'] = status;
+          }
+          final updated = List<Map<String, dynamic>>.from(_messages);
+          updated[index] = row;
+          if (mounted) {
+            setState(() => _messages = updated);
+          }
+        }
+        if (eventChatId == _activeChatId) {
+          _scheduleActiveThreadSync(eventChatId);
         }
         _scheduleChatsRefresh();
         break;
@@ -1879,6 +2040,7 @@ class _ChatsPageState extends State<ChatsPage> {
       final items = (page['items'] as List? ?? const [])
           .map((row) => Map<String, dynamic>.from(row as Map))
           .toList();
+      _rememberStatusesFromMessages(items);
       items.sort(
         (a, b) => (_asInt(a['id']) ?? 0).compareTo(_asInt(b['id']) ?? 0),
       );
@@ -1896,6 +2058,7 @@ class _ChatsPageState extends State<ChatsPage> {
           _onlineUsers.clear();
         }
       });
+      _ackReadForVisibleMessages(chatId, items);
     } catch (error) {
       if (!silent) {
         _show(error);
@@ -1918,6 +2081,7 @@ class _ChatsPageState extends State<ChatsPage> {
       final older = (page['items'] as List? ?? const [])
           .map((row) => Map<String, dynamic>.from(row as Map))
           .toList();
+      _rememberStatusesFromMessages(older);
       final merged = [...older, ..._messages];
       final byId = <int, Map<String, dynamic>>{};
       for (final row in merged) {
@@ -1932,6 +2096,7 @@ class _ChatsPageState extends State<ChatsPage> {
         _messages = sorted;
         _messagesNextBeforeId = _asInt(page['next_before_id']);
       });
+      _ackReadForVisibleMessages(chatId, older);
     } catch (error) {
       _show(error);
     } finally {

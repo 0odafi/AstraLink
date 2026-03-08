@@ -234,6 +234,24 @@ def _mark_messages_read(db: Session, messages: list[Message], user_id: int) -> N
         db.commit()
 
 
+def _delivery_rank(status: MessageDeliveryStatus) -> int:
+    if status == MessageDeliveryStatus.SENT:
+        return 0
+    if status == MessageDeliveryStatus.DELIVERED:
+        return 1
+    return 2
+
+
+def _aggregate_sender_status(peer_statuses: list[MessageDeliveryStatus]) -> MessageDeliveryStatus:
+    if not peer_statuses:
+        return MessageDeliveryStatus.READ
+    if all(value == MessageDeliveryStatus.READ for value in peer_statuses):
+        return MessageDeliveryStatus.READ
+    if all(value in {MessageDeliveryStatus.DELIVERED, MessageDeliveryStatus.READ} for value in peer_statuses):
+        return MessageDeliveryStatus.DELIVERED
+    return MessageDeliveryStatus.SENT
+
+
 def serialize_messages(db: Session, messages: list[Message], user_id: int) -> list[MessageOut]:
     if not messages:
         return []
@@ -269,14 +287,7 @@ def serialize_messages(db: Session, messages: list[Message], user_id: int) -> li
             peer_statuses = [
                 row.status for row in deliveries_by_message.get(message.id, []) if row.user_id != user_id
             ]
-            if not peer_statuses:
-                status = MessageDeliveryStatus.READ
-            elif all(value == MessageDeliveryStatus.READ for value in peer_statuses):
-                status = MessageDeliveryStatus.READ
-            elif all(value in {MessageDeliveryStatus.DELIVERED, MessageDeliveryStatus.READ} for value in peer_statuses):
-                status = MessageDeliveryStatus.DELIVERED
-            else:
-                status = MessageDeliveryStatus.SENT
+            status = _aggregate_sender_status(peer_statuses)
         else:
             delivery = viewer_deliveries.get(message.id)
             status = delivery.status if delivery else MessageDeliveryStatus.SENT
@@ -451,6 +462,70 @@ def remove_message_reaction(db: Session, message_id: int, user_id: int, emoji: s
     db.delete(reaction)
     db.commit()
     return True
+
+
+def update_message_delivery_status(
+    db: Session,
+    message_id: int,
+    user_id: int,
+    status: MessageDeliveryStatus,
+    chat_id: int | None = None,
+) -> tuple[Message, MessageDeliveryStatus, MessageDeliveryStatus, bool]:
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    if not message:
+        raise ValueError("Message not found")
+    if chat_id is not None and message.chat_id != chat_id:
+        raise ValueError("Message is not in this chat")
+
+    _ = _require_member(db, chat_id=message.chat_id, user_id=user_id)
+    if message.sender_id == user_id:
+        sender_peer_statuses = [
+            row.status
+            for row in db.scalars(select(MessageDelivery).where(MessageDelivery.message_id == message_id)).all()
+            if row.user_id != user_id
+        ]
+        sender_status = _aggregate_sender_status(sender_peer_statuses)
+        return message, MessageDeliveryStatus.READ, sender_status, False
+
+    delivery = db.scalar(
+        select(MessageDelivery).where(
+            and_(
+                MessageDelivery.message_id == message_id,
+                MessageDelivery.user_id == user_id,
+            )
+        )
+    )
+    now = datetime.now(UTC)
+    if delivery is None:
+        delivery = MessageDelivery(
+            message_id=message_id,
+            user_id=user_id,
+            status=status,
+            updated_at=now,
+        )
+        db.add(delivery)
+        changed = True
+    else:
+        if _delivery_rank(status) > _delivery_rank(delivery.status):
+            delivery.status = status
+            delivery.updated_at = now
+            changed = True
+        else:
+            changed = False
+
+    if changed:
+        db.commit()
+        db.refresh(delivery)
+    else:
+        db.flush()
+
+    sender_peer_statuses = [
+        row.status
+        for row in db.scalars(select(MessageDelivery).where(MessageDelivery.message_id == message_id)).all()
+        if row.user_id != message.sender_id
+    ]
+    sender_status = _aggregate_sender_status(sender_peer_statuses)
+    return message, delivery.status, sender_status, changed
 
 
 def can_access_chat(db: Session, chat_id: int, user_id: int) -> bool:
