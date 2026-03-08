@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 const String _productionBaseUrl = String.fromEnvironment(
   'ASTRALINK_API_BASE_URL',
@@ -1395,6 +1396,7 @@ class _ChatsPageState extends State<ChatsPage> {
   final _newChatController = TextEditingController();
   final _newMembersController = TextEditingController();
   final _messageController = TextEditingController();
+  final Map<int, WebSocketChannel> _chatChannels = {};
 
   List<Map<String, dynamic>> _chats = [];
   List<Map<String, dynamic>> _messages = [];
@@ -1403,15 +1405,24 @@ class _ChatsPageState extends State<ChatsPage> {
   Map<String, dynamic>? _uidResult;
   bool _loading = false;
   bool _uidLookupLoading = false;
+  bool _realtimeEnabled = true;
+  Timer? _realtimeHeartbeatTimer;
+  Timer? _chatsRefreshTimer;
+  Timer? _activeThreadSyncTimer;
 
   @override
   void initState() {
     super.initState();
+    _startRealtimeHeartbeat();
     _loadChats();
   }
 
   @override
   void dispose() {
+    _realtimeHeartbeatTimer?.cancel();
+    _chatsRefreshTimer?.cancel();
+    _activeThreadSyncTimer?.cancel();
+    _closeAllRealtime();
     _chatSearchController.dispose();
     _uidSearchController.dispose();
     _newChatController.dispose();
@@ -1428,8 +1439,208 @@ class _ChatsPageState extends State<ChatsPage> {
         .toList();
   }
 
-  Future<void> _loadChats() async {
-    setState(() => _loading = true);
+  String? _accessToken() {
+    final token = widget.api.accessToken;
+    if (token == null || token.isEmpty) return null;
+    return token;
+  }
+
+  Uri _chatWsUri(int chatId, String token) {
+    final normalized = widget.api.baseUrl.endsWith('/')
+        ? widget.api.baseUrl.substring(0, widget.api.baseUrl.length - 1)
+        : widget.api.baseUrl;
+    final httpUri = Uri.parse(normalized);
+    final scheme = httpUri.scheme == 'https' ? 'wss' : 'ws';
+    return httpUri.replace(
+      scheme: scheme,
+      path: '/api/realtime/chats/$chatId/ws',
+      queryParameters: {'token': token},
+    );
+  }
+
+  void _startRealtimeHeartbeat() {
+    _realtimeHeartbeatTimer?.cancel();
+    _realtimeHeartbeatTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      for (final channel in _chatChannels.values) {
+        try {
+          channel.sink.add(jsonEncode({'type': 'ping'}));
+        } catch (_) {
+          // Ignore ping failures; reconnect handler covers broken sockets.
+        }
+      }
+    });
+  }
+
+  void _closeRealtime(int chatId) {
+    final channel = _chatChannels.remove(chatId);
+    channel?.sink.close();
+    if (mounted && _chatChannels.isEmpty && _realtimeEnabled) {
+      setState(() => _realtimeEnabled = false);
+    }
+  }
+
+  void _closeAllRealtime() {
+    final chatIds = _chatChannels.keys.toList();
+    for (final chatId in chatIds) {
+      _closeRealtime(chatId);
+    }
+  }
+
+  void _scheduleRealtimeReconnect(int chatId) {
+    Future<void>.delayed(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      final stillNeeded = _chats.any((chat) => _asInt(chat['id']) == chatId);
+      if (!stillNeeded || _chatChannels.containsKey(chatId)) return;
+      _subscribeRealtime(chatId);
+    });
+  }
+
+  void _upsertMessage(Map<String, dynamic> incoming) {
+    final messageId = _asInt(incoming['id']);
+    if (messageId == null) return;
+
+    final next = List<Map<String, dynamic>>.from(_messages);
+    final existingIndex = next.indexWhere((m) => _asInt(m['id']) == messageId);
+    if (existingIndex >= 0) {
+      next[existingIndex] = incoming;
+    } else {
+      next.add(incoming);
+    }
+    next.sort((a, b) => (_asInt(a['id']) ?? 0).compareTo(_asInt(b['id']) ?? 0));
+
+    if (mounted) {
+      setState(() => _messages = next);
+    }
+  }
+
+  void _removeMessage(int messageId) {
+    final next = _messages.where((m) => _asInt(m['id']) != messageId).toList();
+    if (mounted) {
+      setState(() => _messages = next);
+    }
+  }
+
+  void _scheduleChatsRefresh() {
+    _chatsRefreshTimer?.cancel();
+    _chatsRefreshTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      _loadChats(loadActiveMessages: false, silent: true);
+    });
+  }
+
+  void _scheduleActiveThreadSync(int chatId) {
+    _activeThreadSyncTimer?.cancel();
+    _activeThreadSyncTimer = Timer(const Duration(milliseconds: 700), () {
+      if (!mounted || _activeChatId != chatId) return;
+      _loadMessages(chatId, silent: true);
+    });
+  }
+
+  void _handleRealtimeEvent(int socketChatId, dynamic rawEvent) {
+    dynamic payload;
+    if (rawEvent is String) {
+      try {
+        payload = jsonDecode(rawEvent);
+      } catch (_) {
+        return;
+      }
+    } else if (rawEvent is Map) {
+      payload = rawEvent;
+    } else {
+      return;
+    }
+
+    if (payload is! Map) return;
+    final data = Map<String, dynamic>.from(payload);
+    final eventType = data['type']?.toString() ?? '';
+    final eventChatId = _asInt(data['chat_id']) ?? socketChatId;
+
+    switch (eventType) {
+      case 'ready':
+      case 'pong':
+        if (mounted && !_realtimeEnabled) {
+          setState(() => _realtimeEnabled = true);
+        }
+        break;
+      case 'message':
+      case 'message_updated':
+        final messageRaw = data['message'];
+        if (messageRaw is! Map) break;
+        final message = Map<String, dynamic>.from(messageRaw);
+        if (eventChatId == _activeChatId) {
+          _upsertMessage(message);
+          _scheduleActiveThreadSync(eventChatId);
+        }
+        _scheduleChatsRefresh();
+        break;
+      case 'message_deleted':
+        final messageId = _asInt(data['message_id']);
+        if (messageId != null && eventChatId == _activeChatId) {
+          _removeMessage(messageId);
+        }
+        _scheduleChatsRefresh();
+        break;
+      default:
+        break;
+    }
+  }
+
+  void _subscribeRealtime(int chatId) {
+    if (_chatChannels.containsKey(chatId)) return;
+    final token = _accessToken();
+    if (token == null) {
+      if (mounted && _realtimeEnabled) {
+        setState(() => _realtimeEnabled = false);
+      }
+      return;
+    }
+
+    try {
+      final channel = WebSocketChannel.connect(_chatWsUri(chatId, token));
+      _chatChannels[chatId] = channel;
+      if (mounted && !_realtimeEnabled) {
+        setState(() => _realtimeEnabled = true);
+      }
+
+      channel.stream.listen(
+        (event) => _handleRealtimeEvent(chatId, event),
+        onError: (_) {
+          _closeRealtime(chatId);
+          _scheduleRealtimeReconnect(chatId);
+        },
+        onDone: () {
+          _closeRealtime(chatId);
+          _scheduleRealtimeReconnect(chatId);
+        },
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _scheduleRealtimeReconnect(chatId);
+    }
+  }
+
+  void _syncRealtimeSubscriptions() {
+    final desired = _chats
+        .map((chat) => _asInt(chat['id']))
+        .whereType<int>()
+        .toSet();
+    final current = _chatChannels.keys.toSet();
+
+    for (final chatId in current.difference(desired)) {
+      _closeRealtime(chatId);
+    }
+    for (final chatId in desired.difference(current)) {
+      _subscribeRealtime(chatId);
+    }
+  }
+
+  Future<void> _loadChats({
+    bool loadActiveMessages = true,
+    bool silent = false,
+  }) async {
+    if (!silent && mounted) {
+      setState(() => _loading = true);
+    }
     try {
       final chats = await widget.api.chats();
       int? nextActive = _activeChatId;
@@ -1443,20 +1654,25 @@ class _ChatsPageState extends State<ChatsPage> {
         _chats = chats;
         _activeChatId = nextActive;
       });
+      _syncRealtimeSubscriptions();
 
-      if (nextActive != null) {
+      if (nextActive != null && loadActiveMessages) {
         await _loadMessages(nextActive);
-      } else {
+      } else if (nextActive == null) {
         setState(() => _messages = []);
       }
     } catch (error) {
-      _show(error);
+      if (!silent) {
+        _show(error);
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (!silent && mounted) {
+        setState(() => _loading = false);
+      }
     }
   }
 
-  Future<void> _loadMessages(int chatId) async {
+  Future<void> _loadMessages(int chatId, {bool silent = false}) async {
     try {
       final messages = await widget.api.messages(chatId);
       setState(() {
@@ -1464,7 +1680,9 @@ class _ChatsPageState extends State<ChatsPage> {
         _messages = messages;
       });
     } catch (error) {
-      _show(error);
+      if (!silent) {
+        _show(error);
+      }
     }
   }
 
@@ -1521,9 +1739,10 @@ class _ChatsPageState extends State<ChatsPage> {
     if (chatId == null || content.isEmpty) return;
 
     try {
-      await widget.api.sendMessage(chatId, content);
+      final sent = await widget.api.sendMessage(chatId, content);
       _messageController.clear();
-      await _loadMessages(chatId);
+      _upsertMessage(sent);
+      _scheduleChatsRefresh();
     } catch (error) {
       _show(error);
     }
@@ -1938,6 +2157,14 @@ class _ChatsPageState extends State<ChatsPage> {
                         )
                       : const Icon(Icons.refresh_rounded),
                   label: const Text('Refresh'),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  _realtimeEnabled ? Icons.bolt_rounded : Icons.bolt_outlined,
+                  color: _realtimeEnabled
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.outline,
+                  size: 20,
                 ),
               ],
             ),
