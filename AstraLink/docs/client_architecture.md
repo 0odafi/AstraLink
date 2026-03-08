@@ -31,6 +31,8 @@ lib/src/
 - Shared UI primitives are in `core/ui`.
 - Offline cache is enabled for dialogs and message timelines via
   `features/chats/data/chats_local_cache.dart` (`SharedPreferences`).
+- Chat drafts are cached locally via
+  `features/chats/data/chat_drafts_local_cache.dart`.
 - Chats/messages state is managed with `Riverpod` view-models in
   `features/chats/application/chat_view_models.dart`.
 

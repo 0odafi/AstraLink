@@ -193,6 +193,10 @@ class ChatListViewModel extends ChangeNotifier {
     final scoped = switch (activeFilter) {
       'pinned' => allChats.where((chat) => chat.isPinned).toList(),
       'archived' => allChats.where((chat) => chat.isArchived).toList(),
+      'unread' =>
+        allChats
+            .where((chat) => !chat.isArchived && chat.unreadCount > 0)
+            .toList(),
       _ => allChats.where((chat) => !chat.isArchived).toList(),
     };
     final cleaned = query.trim().toLowerCase();

@@ -8,6 +8,7 @@ import '../../../core/ui/adaptive_size.dart';
 import '../../../models.dart';
 import '../../../realtime.dart';
 import '../application/chat_view_models.dart';
+import '../data/chat_drafts_local_cache.dart';
 
 class ChatsTab extends ConsumerStatefulWidget {
   final AstraApi api;
@@ -202,6 +203,27 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
     );
   }
 
+  Future<void> _applyQuickChatAction(
+    ChatItem chat, {
+    bool? isPinned,
+    bool? isArchived,
+  }) async {
+    final tokens = widget.getTokens();
+    if (tokens == null) return;
+    try {
+      await widget.api.updateChatState(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: chat.id,
+        isPinned: isPinned,
+        isArchived: isArchived,
+      );
+      await _loadChats(silent: true);
+    } catch (error) {
+      _showSnack(error.toString());
+    }
+  }
+
   Future<void> _createPrivateChat() async {
     final controller = TextEditingController();
     final query = await showDialog<String>(
@@ -340,6 +362,18 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
                     unawaited(_loadChats(silent: true));
                   },
                 ),
+                SizedBox(width: context.sp(8)),
+                FilterChip(
+                  label: const Text('Unread'),
+                  selected: vm.activeFilter == 'unread',
+                  onSelected: (_) {
+                    if (vm.activeFilter == 'unread') return;
+                    ref
+                        .read(chatListViewModelProvider(_args))
+                        .setFilter('unread');
+                    unawaited(_loadChats(silent: true));
+                  },
+                ),
                 const Spacer(),
                 IconButton(
                   tooltip: 'Search in messages',
@@ -421,22 +455,79 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
                                   SizedBox(height: context.sp(6)),
                               itemBuilder: (context, index) {
                                 final chat = items[index];
-                                return _ChatTile(
-                                  chat: chat,
-                                  onTap: () async {
-                                    await Navigator.of(context).push(
-                                      MaterialPageRoute(
-                                        builder: (_) => ChatScreen(
-                                          api: widget.api,
-                                          getTokens: widget.getTokens,
-                                          chat: chat,
-                                          me: widget.me,
-                                        ),
-                                      ),
+                                return Dismissible(
+                                  key: ValueKey('chat-${chat.id}'),
+                                  direction: DismissDirection.horizontal,
+                                  confirmDismiss: (direction) async {
+                                    if (direction ==
+                                        DismissDirection.startToEnd) {
+                                      await _applyQuickChatAction(
+                                        chat,
+                                        isPinned: !chat.isPinned,
+                                      );
+                                      return false;
+                                    }
+                                    await _applyQuickChatAction(
+                                      chat,
+                                      isArchived: !chat.isArchived,
                                     );
-                                    await _loadChats();
+                                    return false;
                                   },
-                                  onLongPress: () => _showChatActions(chat),
+                                  background: Container(
+                                    decoration: BoxDecoration(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.primaryContainer,
+                                      borderRadius: BorderRadius.circular(
+                                        context.sp(18),
+                                      ),
+                                    ),
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: context.sp(16),
+                                    ),
+                                    alignment: Alignment.centerLeft,
+                                    child: Icon(
+                                      chat.isPinned
+                                          ? Icons.push_pin_outlined
+                                          : Icons.push_pin_rounded,
+                                    ),
+                                  ),
+                                  secondaryBackground: Container(
+                                    decoration: BoxDecoration(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.secondaryContainer,
+                                      borderRadius: BorderRadius.circular(
+                                        context.sp(18),
+                                      ),
+                                    ),
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: context.sp(16),
+                                    ),
+                                    alignment: Alignment.centerRight,
+                                    child: Icon(
+                                      chat.isArchived
+                                          ? Icons.unarchive_outlined
+                                          : Icons.archive_outlined,
+                                    ),
+                                  ),
+                                  child: _ChatTile(
+                                    chat: chat,
+                                    onTap: () async {
+                                      await Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (_) => ChatScreen(
+                                            api: widget.api,
+                                            getTokens: widget.getTokens,
+                                            chat: chat,
+                                            me: widget.me,
+                                          ),
+                                        ),
+                                      );
+                                      await _loadChats();
+                                    },
+                                    onLongPress: () => _showChatActions(chat),
+                                  ),
                                 );
                               },
                             ),
@@ -544,11 +635,13 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   late ChatThreadVmArgs _threadArgs;
+  final ChatDraftsLocalCache _drafts = ChatDraftsLocalCache();
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
 
   RealtimeMeSocket? _realtime;
   Timer? _typingPauseTimer;
+  Timer? _draftDebounce;
   bool _typingSent = false;
   bool _socketConnected = false;
   final Set<int> _typingUserIds = <int>{};
@@ -563,6 +656,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       chatId: widget.chat.id,
     );
     unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
+    unawaited(_loadDraft());
     _startRealtime();
   }
 
@@ -579,6 +673,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         chatId: widget.chat.id,
       );
       unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
+      _messageController.clear();
+      unawaited(_loadDraft());
       _startRealtime();
     }
   }
@@ -587,10 +683,48 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void dispose() {
     _notifyTypingStopped();
     _typingPauseTimer?.cancel();
+    _draftDebounce?.cancel();
     _realtime?.stop();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadDraft() async {
+    final draft = await _drafts.loadDraft(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+      chatId: widget.chat.id,
+    );
+    if (!mounted || draft == null || draft.isEmpty) return;
+    _messageController.text = draft;
+    _messageController.selection = TextSelection.collapsed(
+      offset: _messageController.text.length,
+    );
+    setState(() {});
+  }
+
+  void _scheduleDraftSave() {
+    _draftDebounce?.cancel();
+    _draftDebounce = Timer(const Duration(milliseconds: 350), () {
+      unawaited(
+        _drafts.saveDraft(
+          baseUrl: widget.api.baseUrl,
+          userId: widget.me.id,
+          chatId: widget.chat.id,
+          text: _messageController.text,
+        ),
+      );
+    });
+  }
+
+  Future<void> _clearDraft() async {
+    _draftDebounce?.cancel();
+    await _drafts.clearDraft(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+      chatId: widget.chat.id,
+    );
   }
 
   List<MessageItem> get _messages {
@@ -730,6 +864,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   void _onComposerChanged(String _) {
     final hasText = _messageController.text.trim().isNotEmpty;
+    _scheduleDraftSave();
     if (hasText && !_typingSent) {
       _typingSent = true;
       _sendRealtime({
@@ -771,6 +906,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (error == null) {
       _messageController.clear();
       _notifyTypingStopped();
+      await _clearDraft();
       _scrollToBottom();
       if (mounted) setState(() {});
       return;
@@ -858,32 +994,52 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 context.sp(10),
                 context.sp(10),
               ),
-              child: Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _messageController,
-                      minLines: 1,
-                      maxLines: 5,
-                      decoration: const InputDecoration(hintText: 'Message'),
-                      onChanged: _onComposerChanged,
+                  if (_messageController.text.trim().isNotEmpty)
+                    Padding(
+                      padding: EdgeInsets.only(bottom: context.sp(6)),
+                      child: Text(
+                        'Draft is saved automatically',
+                        style: TextStyle(
+                          fontSize: context.sp(11),
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
                     ),
-                  ),
-                  SizedBox(width: context.sp(8)),
-                  FilledButton(
-                    onPressed:
-                        _messageController.text.trim().isNotEmpty && !vm.sending
-                        ? _sendMessage
-                        : null,
-                    child: vm.sending
-                        ? SizedBox(
-                            width: context.sp(16),
-                            height: context.sp(16),
-                            child: const CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Icon(Icons.send_rounded),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _messageController,
+                          minLines: 1,
+                          maxLines: 5,
+                          decoration: const InputDecoration(
+                            hintText: 'Message',
+                          ),
+                          onChanged: _onComposerChanged,
+                        ),
+                      ),
+                      SizedBox(width: context.sp(8)),
+                      FilledButton(
+                        onPressed:
+                            _messageController.text.trim().isNotEmpty &&
+                                !vm.sending
+                            ? _sendMessage
+                            : null,
+                        child: vm.sending
+                            ? SizedBox(
+                                width: context.sp(16),
+                                height: context.sp(16),
+                                child: const CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.send_rounded),
+                      ),
+                    ],
                   ),
                 ],
               ),
