@@ -6,6 +6,7 @@ import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
 import '../../../models.dart';
 import '../../../realtime.dart';
+import '../data/chats_local_cache.dart';
 
 class ChatsTab extends StatefulWidget {
   final AstraApi api;
@@ -24,6 +25,7 @@ class ChatsTab extends StatefulWidget {
 }
 
 class _ChatsTabState extends State<ChatsTab> {
+  final ChatsLocalCache _cache = ChatsLocalCache();
   final _searchController = TextEditingController();
   bool _loading = true;
   List<ChatItem> _all = const [];
@@ -37,7 +39,7 @@ class _ChatsTabState extends State<ChatsTab> {
   @override
   void initState() {
     super.initState();
-    unawaited(_loadChats());
+    unawaited(_primeChats());
     _startRealtime();
   }
 
@@ -98,23 +100,46 @@ class _ChatsTabState extends State<ChatsTab> {
     });
   }
 
+  Future<void> _primeChats() async {
+    await _loadCachedChats();
+    await _loadChats();
+  }
+
+  Future<void> _loadCachedChats() async {
+    final cached = await _cache.loadChats(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+    );
+    if (!mounted || cached.isEmpty) return;
+    setState(() {
+      _all = cached;
+      _loading = false;
+    });
+  }
+
   Future<void> _loadChats({bool silent = false}) async {
     final tokens = widget.getTokens();
     if (tokens == null) return;
-    if (mounted && !silent) setState(() => _loading = true);
+    if (mounted && !silent && _all.isEmpty) setState(() => _loading = true);
     try {
       final chats = await widget.api.listChats(
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
-        archivedOnly: _activeFilter == 'archived',
-        pinnedOnly: _activeFilter == 'pinned',
+        includeArchived: true,
       );
       if (!mounted) return;
       setState(() {
         _all = chats;
       });
+      unawaited(
+        _cache.saveChats(
+          baseUrl: widget.api.baseUrl,
+          userId: widget.me.id,
+          chats: chats,
+        ),
+      );
     } catch (error) {
-      if (!silent) {
+      if (!silent && _all.isEmpty) {
         _showSnack(error.toString());
       }
     } finally {
@@ -130,9 +155,14 @@ class _ChatsTabState extends State<ChatsTab> {
   }
 
   List<ChatItem> get _filtered {
+    final scoped = switch (_activeFilter) {
+      'pinned' => _all.where((chat) => chat.isPinned).toList(),
+      'archived' => _all.where((chat) => chat.isArchived).toList(),
+      _ => _all.where((chat) => !chat.isArchived).toList(),
+    };
     final q = _searchController.text.trim().toLowerCase();
-    if (q.isEmpty) return _all;
-    return _all.where((chat) {
+    if (q.isEmpty) return scoped;
+    return scoped.where((chat) {
       return chat.title.toLowerCase().contains(q) ||
           (chat.lastMessagePreview ?? '').toLowerCase().contains(q);
     }).toList();
@@ -341,7 +371,7 @@ class _ChatsTabState extends State<ChatsTab> {
                   onSelected: (_) {
                     if (_activeFilter == 'all') return;
                     setState(() => _activeFilter = 'all');
-                    unawaited(_loadChats());
+                    unawaited(_loadChats(silent: true));
                   },
                 ),
                 SizedBox(width: context.sp(8)),
@@ -351,7 +381,7 @@ class _ChatsTabState extends State<ChatsTab> {
                   onSelected: (_) {
                     if (_activeFilter == 'pinned') return;
                     setState(() => _activeFilter = 'pinned');
-                    unawaited(_loadChats());
+                    unawaited(_loadChats(silent: true));
                   },
                 ),
                 SizedBox(width: context.sp(8)),
@@ -361,7 +391,7 @@ class _ChatsTabState extends State<ChatsTab> {
                   onSelected: (_) {
                     if (_activeFilter == 'archived') return;
                     setState(() => _activeFilter = 'archived');
-                    unawaited(_loadChats());
+                    unawaited(_loadChats(silent: true));
                   },
                 ),
                 const Spacer(),
@@ -567,6 +597,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  final ChatsLocalCache _cache = ChatsLocalCache();
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
 
@@ -575,6 +606,7 @@ class _ChatScreenState extends State<ChatScreen> {
   List<MessageItem> _messages = const [];
   RealtimeMeSocket? _realtime;
   Timer? _typingPauseTimer;
+  Timer? _cachePersistDebounce;
   bool _typingSent = false;
   bool _socketConnected = false;
   final Set<int> _typingUserIds = <int>{};
@@ -582,7 +614,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    unawaited(_loadMessages());
+    unawaited(_primeMessages());
     _startRealtime();
   }
 
@@ -590,16 +622,37 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _notifyTypingStopped();
     _typingPauseTimer?.cancel();
+    _cachePersistDebounce?.cancel();
     _realtime?.stop();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
+  Future<void> _primeMessages() async {
+    await _loadCachedMessages();
+    await _loadMessages();
+  }
+
+  Future<void> _loadCachedMessages() async {
+    final cached = await _cache.loadMessages(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+      chatId: widget.chat.id,
+    );
+    if (!mounted || cached.isEmpty) return;
+    setState(() {
+      _messages = cached;
+      _loading = false;
+    });
+    _scrollToBottom();
+    _ackUnreadMessages();
+  }
+
   Future<void> _loadMessages() async {
     final tokens = widget.getTokens();
     if (tokens == null) return;
-    if (mounted) setState(() => _loading = true);
+    if (mounted && _messages.isEmpty) setState(() => _loading = true);
     try {
       final rows = await widget.api.listMessages(
         accessToken: tokens.accessToken,
@@ -611,13 +664,32 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _messages = rows;
       });
+      _schedulePersistMessages();
       _scrollToBottom();
       _ackUnreadMessages();
     } catch (error) {
-      _showSnack(error.toString());
+      if (_messages.isEmpty) {
+        _showSnack(error.toString());
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _schedulePersistMessages() {
+    _cachePersistDebounce?.cancel();
+    _cachePersistDebounce = Timer(const Duration(milliseconds: 300), () {
+      unawaited(_persistMessages());
+    });
+  }
+
+  Future<void> _persistMessages() async {
+    await _cache.saveMessages(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+      chatId: widget.chat.id,
+      messages: _messages,
+    );
   }
 
   String _buildRealtimeUrl() {
@@ -695,6 +767,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages = [..._messages, item]
           ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       });
+      _schedulePersistMessages();
       _scrollToBottom();
       _ackMessageRead(item);
       return;
@@ -711,6 +784,7 @@ class _ChatScreenState extends State<ChatScreen> {
             .map((row) => row.id == item.id ? item : row)
             .toList();
       });
+      _schedulePersistMessages();
       return;
     }
 
@@ -722,6 +796,7 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _messages = _messages.where((row) => row.id != messageId).toList();
       });
+      _schedulePersistMessages();
       return;
     }
 
@@ -748,6 +823,7 @@ class _ChatScreenState extends State<ChatScreen> {
             )
             .toList();
       });
+      _schedulePersistMessages();
     }
   }
 
@@ -824,6 +900,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages = [..._messages, sent]
             ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
         });
+        _schedulePersistMessages();
       }
       _scrollToBottom();
     } catch (error) {
@@ -1019,4 +1096,3 @@ class _MessageBubble extends StatelessWidget {
     }
   }
 }
-

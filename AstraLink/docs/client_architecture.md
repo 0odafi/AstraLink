@@ -29,7 +29,9 @@ lib/src/
 - `home_shell.dart` composes tabs and bottom navigation.
 - Chat realtime/reconnect logic remains in `features/chats/presentation/chats_tab.dart`.
 - Shared UI primitives are in `core/ui`.
+- Offline cache is enabled for dialogs and message timelines via
+  `features/chats/data/chats_local_cache.dart` (`SharedPreferences`).
 
 ## Next step
 
-- Move business logic from widgets into feature controllers (`Cubit`/`Riverpod`) to support offline cache and easier testing.
+- Move business logic from widgets into feature controllers (`Cubit`/`Riverpod`) for cleaner state flow and easier testing.
