@@ -2719,7 +2719,7 @@ class _ChatsPageState extends State<ChatsPage> {
     final isOwn =
         widget.currentUserId != null && senderId == widget.currentUserId;
     final reactions = _messageReactionRows(message);
-    final quickEmojis = ['рџ‘Ќ', 'рџ”Ґ', 'вќ¤пёЏ', 'рџ‚', 'рџ‘Џ'];
+    final quickEmojis = ['👍', '🔥', '❤️', '😂', '😎'];
 
     await showModalBottomSheet<void>(
       context: context,
@@ -3390,7 +3390,16 @@ class _ChatsPageState extends State<ChatsPage> {
                 colors: [Color(0xFF0C0F15), Color(0xFF111624)],
               ),
             ),
-            child: threadContent,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(painter: _ThreadPatternPainter()),
+                  ),
+                ),
+                threadContent,
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 8),
@@ -3617,9 +3626,18 @@ class _ChatsPageState extends State<ChatsPage> {
               TextField(
                 controller: _chatSearchController,
                 onChanged: (value) => setState(() => _chatQuery = value),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   hintText: 'Search chats, people, messages',
-                  prefixIcon: Icon(Icons.search_rounded),
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  suffixIcon: _chatQuery.trim().isEmpty
+                      ? null
+                      : IconButton(
+                          onPressed: () {
+                            _chatSearchController.clear();
+                            setState(() => _chatQuery = '');
+                          },
+                          icon: const Icon(Icons.close_rounded),
+                        ),
                 ),
               ),
               const SizedBox(height: 10),
@@ -3689,6 +3707,16 @@ class _ChatsPageState extends State<ChatsPage> {
                   itemCount: folderTabs.length,
                 ),
               ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '${_visibleChats.length} chats',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: const Color(0xFF9098AC),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -3711,65 +3739,88 @@ class _ChatsPageState extends State<ChatsPage> {
       ],
     );
 
+    final headerTitle = _activeChatId == null ? 'Conversation' : activeTitle;
+    final headerSubtitle = _activeChatId == null
+        ? 'Select a chat from the list'
+        : activeSubtitle;
+
     final threadPane = Column(
       children: [
-        if (!wide)
-          Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF151A24),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFF262D3A)),
-            ),
-            child: Row(
-              children: [
+        Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFF151A24),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFF262D3A)),
+          ),
+          child: Row(
+            children: [
+              if (!wide)
                 IconButton(
                   onPressed: () => setState(() => _mobileThreadOpen = false),
                   icon: const Icon(Icons.arrow_back_rounded),
                 ),
-                CircleAvatar(
-                  radius: 18,
-                  backgroundColor: const Color(0xFF3A2D57),
-                  child: Text(
-                    activeTitle.isNotEmpty ? activeTitle[0].toUpperCase() : '?',
-                    style: const TextStyle(color: Colors.white),
-                  ),
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: const Color(0xFF3A2D57),
+                child: Text(
+                  headerTitle.isNotEmpty ? headerTitle[0].toUpperCase() : '?',
+                  style: const TextStyle(color: Colors.white),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        activeTitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      headerTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    Text(
+                      headerSubtitle,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: const Color(0xFF8F95AA),
                       ),
-                      Text(
-                        activeSubtitle,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: const Color(0xFF8F95AA),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                PopupMenuButton<String>(
-                  color: const Color(0xFF1A1F2A),
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(value: 'clear', child: Text('Close chat')),
+                    ),
                   ],
-                  onSelected: (value) {
-                    if (value == 'clear') {
-                      setState(() => _mobileThreadOpen = false);
-                    }
-                  },
                 ),
-              ],
-            ),
+              ),
+              IconButton(
+                tooltip: 'Search in chat',
+                onPressed: _activeChatId == null
+                    ? null
+                    : () => _show('In-chat search is coming soon'),
+                icon: const Icon(Icons.search_rounded),
+              ),
+              PopupMenuButton<String>(
+                color: const Color(0xFF1A1F2A),
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'refresh', child: Text('Refresh')),
+                  PopupMenuItem(value: 'clear', child: Text('Close chat')),
+                ],
+                onSelected: (value) {
+                  if (value == 'refresh') {
+                    final chatId = _activeChatId;
+                    if (chatId != null) {
+                      _loadMessages(chatId);
+                    }
+                  } else if (value == 'clear') {
+                    setState(() {
+                      _activeChatId = null;
+                      _messages = [];
+                      _messagesNextBeforeId = null;
+                      _mobileThreadOpen = false;
+                    });
+                  }
+                },
+              ),
+            ],
           ),
+        ),
         Expanded(
           child: Container(
             decoration: BoxDecoration(
@@ -3794,7 +3845,17 @@ class _ChatsPageState extends State<ChatsPage> {
                 Expanded(flex: 58, child: threadPane),
               ],
             )
-          : (showThreadOnly ? threadPane : listPane),
+          : AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              child: showThreadOnly
+                  ? KeyedSubtree(
+                      key: const ValueKey('thread'),
+                      child: threadPane,
+                    )
+                  : KeyedSubtree(key: const ValueKey('list'), child: listPane),
+            ),
     );
   }
 }
@@ -3947,7 +4008,7 @@ class _FeedPageState extends State<FeedPage> {
                               Text(post['content']?.toString() ?? ''),
                               const SizedBox(height: 6),
                               Text(
-                                'author ${post['author_id']} вЂў ${post['visibility']}',
+                                'author ${post['author_id']} РІР‚Сћ ${post['visibility']}',
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
                                 ),
@@ -4817,6 +4878,33 @@ class _CustomizationPageState extends State<CustomizationPage> {
             ),
     );
   }
+}
+
+class _ThreadPatternPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final strokePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.1
+      ..color = const Color(0xFF8A5BB5).withValues(alpha: 0.12);
+    final dotPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = const Color(0xFF7E8ED6).withValues(alpha: 0.09);
+
+    const spacing = 78.0;
+    for (double y = 26; y < size.height + spacing; y += spacing) {
+      for (double x = 20; x < size.width + spacing; x += spacing) {
+        final wave = ((x / spacing).round() % 2 == 0) ? 8.0 : -8.0;
+        final center = Offset(x, y + wave);
+        canvas.drawCircle(center, 10, strokePaint);
+        canvas.drawCircle(center.translate(20, -20), 1.6, dotPaint);
+        canvas.drawCircle(center.translate(-14, 18), 1.4, dotPaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _SectionCard extends StatelessWidget {
