@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -32,7 +32,9 @@ void main() {
 String normalizeBaseUrl(String input) {
   final trimmed = input.trim();
   if (trimmed.isEmpty) return _productionBaseUrl;
-  return trimmed.endsWith('/') ? trimmed.substring(0, trimmed.length - 1) : trimmed;
+  return trimmed.endsWith('/')
+      ? trimmed.substring(0, trimmed.length - 1)
+      : trimmed;
 }
 
 String inferDefaultBaseUrl() => normalizeBaseUrl(_productionBaseUrl);
@@ -79,25 +81,23 @@ bool isVersionNewer(String candidate, String current) {
 
 class SessionTokens {
   final String accessToken;
-  final String refreshToken;
+  final String? refreshToken;
 
-  const SessionTokens({
-    required this.accessToken,
-    required this.refreshToken,
-  });
+  const SessionTokens({required this.accessToken, required this.refreshToken});
 }
 
 ThemeData _buildTheme() {
-  final scheme = ColorScheme.fromSeed(
-    seedColor: const Color(0xFF2F6D84),
-    brightness: Brightness.light,
-  ).copyWith(
-    primary: const Color(0xFF2F6D84),
-    secondary: const Color(0xFF5C8798),
-    tertiary: const Color(0xFF6F8B7F),
-    surface: const Color(0xFFF2F6F8),
-    outline: const Color(0xFF9FB0B8),
-  );
+  final scheme =
+      ColorScheme.fromSeed(
+        seedColor: const Color(0xFF2F6D84),
+        brightness: Brightness.light,
+      ).copyWith(
+        primary: const Color(0xFF2F6D84),
+        secondary: const Color(0xFF5C8798),
+        tertiary: const Color(0xFF6F8B7F),
+        surface: const Color(0xFFF2F6F8),
+        outline: const Color(0xFF9FB0B8),
+      );
 
   return ThemeData(
     useMaterial3: true,
@@ -198,7 +198,8 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
     final prefs = await SharedPreferences.getInstance();
     final storedRaw = prefs.getString(_baseUrlKey);
     final stored = normalizeBaseUrl(storedRaw ?? '');
-    final migratedBase = storedRaw == null || _legacyLocalBaseUrls.contains(stored)
+    final migratedBase =
+        storedRaw == null || _legacyLocalBaseUrls.contains(stored)
         ? inferDefaultBaseUrl()
         : stored;
 
@@ -228,6 +229,8 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
       await prefs.setString(_accessTokenKey, accessToken);
       if (refreshToken != null && refreshToken.isNotEmpty) {
         await prefs.setString(_refreshTokenKey, refreshToken);
+      } else {
+        await prefs.remove(_refreshTokenKey);
       }
     }
   }
@@ -258,7 +261,11 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
   }
 
   Future<void> _onLogout() async {
-    await _saveSession(baseUrl: _baseUrl, accessToken: null, refreshToken: null);
+    await _saveSession(
+      baseUrl: _baseUrl,
+      accessToken: null,
+      refreshToken: null,
+    );
     setState(() {
       _accessToken = null;
       _refreshToken = null;
@@ -279,10 +286,7 @@ class _AstraLinkAppState extends State<AstraLinkApp> {
       debugShowCheckedModeBanner: false,
       theme: _buildTheme(),
       home: _accessToken == null
-          ? AuthScreen(
-              baseUrl: _baseUrl,
-              onAuthenticated: _onAuthenticated,
-            )
+          ? AuthScreen(baseUrl: _baseUrl, onAuthenticated: _onAuthenticated)
           : HomeScreen(
               token: _accessToken!,
               refreshToken: _refreshToken,
@@ -300,6 +304,7 @@ class ApiException implements Exception {
   @override
   String toString() => message;
 }
+
 class ApiClient {
   final String baseUrl;
   String? accessToken;
@@ -384,6 +389,61 @@ class ApiClient {
     }
   }
 
+  String _friendlyFieldName(String raw) {
+    switch (raw) {
+      case 'login':
+        return 'Login';
+      case 'username':
+        return 'Username';
+      case 'email':
+        return 'Email';
+      case 'password':
+        return 'Password';
+      default:
+        if (raw.isEmpty) return 'Field';
+        return '${raw[0].toUpperCase()}${raw.substring(1)}';
+    }
+  }
+
+  String _extractErrorMessage(dynamic detail) {
+    if (detail is String && detail.trim().isNotEmpty) {
+      return detail.trim();
+    }
+
+    if (detail is List) {
+      final parts = <String>[];
+      for (final item in detail) {
+        if (item is Map) {
+          final msg = item['msg']?.toString().trim();
+          if (msg == null || msg.isEmpty) continue;
+          final loc = item['loc'];
+          if (loc is List && loc.isNotEmpty) {
+            final field = _friendlyFieldName(loc.last.toString());
+            parts.add('$field: $msg');
+          } else {
+            parts.add(msg);
+          }
+          continue;
+        }
+        if (item != null) {
+          parts.add(item.toString());
+        }
+      }
+      if (parts.isNotEmpty) {
+        return parts.join('\n');
+      }
+    }
+
+    if (detail is Map) {
+      final message = detail['message']?.toString().trim();
+      if (message != null && message.isNotEmpty) {
+        return message;
+      }
+    }
+
+    return 'Request failed. Please verify input and try again.';
+  }
+
   Future<bool> _tryRefreshAccessToken() async {
     final token = refreshToken;
     if (token == null || token.isEmpty) return false;
@@ -399,15 +459,18 @@ class ApiClient {
       final payload = Map<String, dynamic>.from(result as Map);
       final newAccess = payload['access_token']?.toString();
       final newRefresh = payload['refresh_token']?.toString();
-      if (newAccess == null || newAccess.isEmpty || newRefresh == null || newRefresh.isEmpty) {
+      if (newAccess == null || newAccess.isEmpty) {
         return false;
       }
+      final resolvedRefresh = newRefresh == null || newRefresh.isEmpty
+          ? token
+          : newRefresh;
 
       accessToken = newAccess;
-      refreshToken = newRefresh;
+      refreshToken = resolvedRefresh;
       if (onSessionUpdated != null) {
         await onSessionUpdated!(
-          SessionTokens(accessToken: newAccess, refreshToken: newRefresh),
+          SessionTokens(accessToken: newAccess, refreshToken: resolvedRefresh),
         );
       }
       return true;
@@ -429,7 +492,9 @@ class ApiClient {
     try {
       response = await _sendHttp(method, uri, withAuth: withAuth, body: body);
     } on TimeoutException {
-      throw ApiException('Connection timeout. Check internet or server status.');
+      throw ApiException(
+        'Connection timeout. Check internet or server status.',
+      );
     } catch (_) {
       throw ApiException('Network error. Check internet or server DNS.');
     }
@@ -447,7 +512,7 @@ class ApiClient {
 
     if (response.statusCode >= 400) {
       if (decoded is Map<String, dynamic> && decoded['detail'] != null) {
-        throw ApiException(decoded['detail'].toString());
+        throw ApiException(_extractErrorMessage(decoded['detail']));
       }
       throw ApiException('HTTP ${response.statusCode}: ${response.body}');
     }
@@ -621,6 +686,7 @@ class ApiClient {
     }
   }
 }
+
 class AuthScreen extends StatefulWidget {
   final String baseUrl;
   final Future<void> Function(SessionTokens tokens) onAuthenticated;
@@ -641,8 +707,24 @@ class _AuthScreenState extends State<AuthScreen> {
   final _regUserController = TextEditingController();
   final _regEmailController = TextEditingController();
   final _regPasswordController = TextEditingController();
+  static final RegExp _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
   bool _loading = false;
+
+  bool get _canLogin {
+    final login = _loginController.text.trim();
+    final password = _passwordController.text.trim();
+    return login.length >= 3 && password.length >= 8;
+  }
+
+  bool get _canRegister {
+    final username = _regUserController.text.trim();
+    final email = _regEmailController.text.trim();
+    final password = _regPasswordController.text.trim();
+    return username.length >= 3 &&
+        _emailPattern.hasMatch(email) &&
+        password.length >= 8;
+  }
 
   @override
   void dispose() {
@@ -654,9 +736,16 @@ class _AuthScreenState extends State<AuthScreen> {
     super.dispose();
   }
 
+  void _onFieldChanged(String _) {
+    if (!_loading) {
+      setState(() {});
+    }
+  }
+
   Future<void> _run(
     Future<Map<String, dynamic>> Function(ApiClient client) action,
   ) async {
+    if (_loading) return;
     setState(() => _loading = true);
     try {
       final client = ApiClient(baseUrl: widget.baseUrl);
@@ -666,22 +755,180 @@ class _AuthScreenState extends State<AuthScreen> {
       if (accessToken == null || accessToken.isEmpty) {
         throw ApiException('Access token not received');
       }
-      if (refreshToken == null || refreshToken.isEmpty) {
-        throw ApiException('Refresh token not received');
-      }
+      final normalizedRefresh = refreshToken == null || refreshToken.isEmpty
+          ? null
+          : refreshToken;
       await widget.onAuthenticated(
-        SessionTokens(accessToken: accessToken, refreshToken: refreshToken),
+        SessionTokens(
+          accessToken: accessToken,
+          refreshToken: normalizedRefresh,
+        ),
       );
     } catch (error) {
       if (!mounted) return;
+      final message = error is ApiException
+          ? error.message
+          : 'Unable to complete request. Try again.';
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(error.toString())));
+      ).showSnackBar(SnackBar(content: Text(message)));
     } finally {
       if (mounted) {
         setState(() => _loading = false);
       }
     }
+  }
+
+  Widget _buildAuthField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    bool obscureText = false,
+    TextInputType? keyboardType,
+    String? helperText,
+  }) {
+    return TextField(
+      controller: controller,
+      enabled: !_loading,
+      obscureText: obscureText,
+      keyboardType: keyboardType,
+      onChanged: _onFieldChanged,
+      decoration: InputDecoration(
+        labelText: label,
+        helperText: helperText,
+        prefixIcon: Icon(icon),
+      ),
+    );
+  }
+
+  Widget _buildSubmitButton({
+    required bool enabled,
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return FilledButton.icon(
+      onPressed: enabled && !_loading ? onPressed : null,
+      style: FilledButton.styleFrom(
+        minimumSize: const Size.fromHeight(54),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+      icon: _loading
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : Icon(icon),
+      label: Text(_loading ? 'Please wait...' : label),
+    );
+  }
+
+  Widget _buildLoginTab(ThemeData theme) {
+    return ListView(
+      children: [
+        Text(
+          'Welcome back',
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Use your username or email to continue.',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 14),
+        _buildAuthField(
+          controller: _loginController,
+          label: 'Username or email',
+          icon: Icons.alternate_email_rounded,
+          helperText: 'Minimum 3 characters',
+        ),
+        const SizedBox(height: 8),
+        _buildAuthField(
+          controller: _passwordController,
+          label: 'Password',
+          icon: Icons.lock_outline_rounded,
+          obscureText: true,
+          helperText: 'Minimum 8 characters',
+        ),
+        const SizedBox(height: 12),
+        _buildSubmitButton(
+          enabled: _canLogin,
+          icon: Icons.login_rounded,
+          label: 'Login',
+          onPressed: () {
+            _run(
+              (client) => client.login(
+                _loginController.text.trim(),
+                _passwordController.text.trim(),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRegisterTab(ThemeData theme) {
+    return ListView(
+      children: [
+        Text(
+          'Create your account',
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Choose your identity and start messaging instantly.',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 14),
+        _buildAuthField(
+          controller: _regUserController,
+          label: 'Username',
+          icon: Icons.person_outline_rounded,
+          helperText: 'Minimum 3 characters',
+        ),
+        const SizedBox(height: 8),
+        _buildAuthField(
+          controller: _regEmailController,
+          label: 'Email',
+          icon: Icons.mail_outline_rounded,
+          keyboardType: TextInputType.emailAddress,
+          helperText: 'Valid email required',
+        ),
+        const SizedBox(height: 8),
+        _buildAuthField(
+          controller: _regPasswordController,
+          label: 'Password',
+          icon: Icons.key_rounded,
+          obscureText: true,
+          helperText: 'Minimum 8 characters',
+        ),
+        const SizedBox(height: 12),
+        _buildSubmitButton(
+          enabled: _canRegister,
+          icon: Icons.person_add_alt_1_rounded,
+          label: 'Create account',
+          onPressed: () {
+            _run(
+              (client) => client.register(
+                _regUserController.text.trim(),
+                _regEmailController.text.trim(),
+                _regPasswordController.text.trim(),
+              ),
+            );
+          },
+        ),
+      ],
+    );
   }
 
   @override
@@ -691,157 +938,160 @@ class _AuthScreenState extends State<AuthScreen> {
     return DefaultTabController(
       length: 2,
       child: Scaffold(
-        body: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFFE7EEF2), Color(0xFFF5F8FA)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
+        body: Stack(
+          children: [
+            Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Color(0xFFE4EDF2), Color(0xFFF8FBFC)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
             ),
-          ),
-          child: SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 540),
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Container(
-                                width: 48,
-                                height: 48,
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.primary.withOpacity(0.14),
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: Icon(
-                                  Icons.bolt_rounded,
-                                  color: theme.colorScheme.primary,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'AstraLink',
-                                      style: theme.textTheme.headlineSmall?.copyWith(
-                                        fontWeight: FontWeight.w700,
-                                      ),
+            Positioned(
+              top: -100,
+              right: -90,
+              child: Container(
+                width: 260,
+                height: 260,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: theme.colorScheme.primary.withOpacity(0.08),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: -120,
+              left: -80,
+              child: Container(
+                width: 260,
+                height: 260,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: theme.colorScheme.secondary.withOpacity(0.09),
+                ),
+              ),
+            ),
+            SafeArea(
+              child: Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 16,
+                  ),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 460),
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Container(
+                                  width: 56,
+                                  height: 56,
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: [
+                                        theme.colorScheme.primary.withOpacity(
+                                          0.22,
+                                        ),
+                                        theme.colorScheme.secondary.withOpacity(
+                                          0.3,
+                                        ),
+                                      ],
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
                                     ),
-                                    Text(
-                                      'Private messaging platform',
-                                      style: theme.textTheme.bodyMedium?.copyWith(
-                                        color: theme.colorScheme.onSurfaceVariant,
-                                      ),
-                                    ),
-                                  ],
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  child: Icon(
+                                    Icons.bolt_rounded,
+                                    color: theme.colorScheme.primary,
+                                    size: 30,
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 18),
-                          const TabBar(
-                            tabs: [
-                              Tab(text: 'Login'),
-                              Tab(text: 'Register'),
-                            ],
-                          ),
-                          const SizedBox(height: 14),
-                          SizedBox(
-                            height: 320,
-                            child: _loading
-                                ? const Center(child: CircularProgressIndicator())
-                                : TabBarView(
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      ListView(
-                                        children: [
-                                          TextField(
-                                            controller: _loginController,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Username or email',
+                                      Text(
+                                        'AstraLink',
+                                        style: theme.textTheme.headlineSmall
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w800,
+                                              letterSpacing: -0.3,
                                             ),
-                                          ),
-                                          const SizedBox(height: 12),
-                                          TextField(
-                                            controller: _passwordController,
-                                            obscureText: true,
-                                            decoration: const InputDecoration(
-                                              labelText: 'Password',
-                                            ),
-                                          ),
-                                          const SizedBox(height: 16),
-                                          FilledButton.icon(
-                                            onPressed: () {
-                                              _run(
-                                                (client) => client.login(
-                                                  _loginController.text.trim(),
-                                                  _passwordController.text.trim(),
-                                                ),
-                                              );
-                                            },
-                                            icon: const Icon(Icons.login),
-                                            label: const Text('Login'),
-                                          ),
-                                        ],
                                       ),
-                                      ListView(
-                                        children: [
-                                          TextField(
-                                            controller: _regUserController,
-                                            decoration: const InputDecoration(labelText: 'Username'),
-                                          ),
-                                          const SizedBox(height: 12),
-                                          TextField(
-                                            controller: _regEmailController,
-                                            keyboardType: TextInputType.emailAddress,
-                                            decoration: const InputDecoration(labelText: 'Email'),
-                                          ),
-                                          const SizedBox(height: 12),
-                                          TextField(
-                                            controller: _regPasswordController,
-                                            obscureText: true,
-                                            decoration: const InputDecoration(labelText: 'Password'),
-                                          ),
-                                          const SizedBox(height: 16),
-                                          FilledButton.icon(
-                                            onPressed: () {
-                                              _run(
-                                                (client) => client.register(
-                                                  _regUserController.text.trim(),
-                                                  _regEmailController.text.trim(),
-                                                  _regPasswordController.text.trim(),
-                                                ),
-                                              );
-                                            },
-                                            icon: const Icon(Icons.person_add_alt_1),
-                                            label: const Text('Create account'),
-                                          ),
-                                        ],
+                                      Text(
+                                        'Private messaging, reimagined',
+                                        style: theme.textTheme.bodyMedium
+                                            ?.copyWith(
+                                              color: theme
+                                                  .colorScheme
+                                                  .onSurfaceVariant,
+                                            ),
                                       ),
                                     ],
                                   ),
-                          ),
-                        ],
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 20),
+                            Container(
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFEAF2F6),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: TabBar(
+                                indicator: BoxDecoration(
+                                  color: theme.colorScheme.primary,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                indicatorSize: TabBarIndicatorSize.tab,
+                                dividerColor: Colors.transparent,
+                                labelColor: Colors.white,
+                                unselectedLabelColor:
+                                    theme.colorScheme.onSurfaceVariant,
+                                labelStyle: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                tabs: const [
+                                  Tab(text: 'Login'),
+                                  Tab(text: 'Register'),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            SizedBox(
+                              height: 360,
+                              child: TabBarView(
+                                children: [
+                                  _buildLoginTab(theme),
+                                  _buildRegisterTab(theme),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
   }
 }
+
 class HomeScreen extends StatefulWidget {
   final String token;
   final String? refreshToken;
@@ -865,6 +1115,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late ApiClient _api;
   int _tab = 0;
+  int? _myUserId;
   String _identity = 'Connecting...';
   Map<String, dynamic>? _availableRelease;
   String? _currentVersion;
@@ -891,9 +1142,14 @@ class _HomeScreenState extends State<HomeScreen> {
       final id = _asInt(me['id']);
       final username = me['username']?.toString() ?? 'User';
       final uid = me['uid']?.toString();
-      final uidPart = uid == null || uid.isEmpty ? '' : ' @${uid.toLowerCase()}';
+      final uidPart = uid == null || uid.isEmpty
+          ? ''
+          : ' @${uid.toLowerCase()}';
       setState(() {
-        _identity = id == null ? '$username$uidPart' : '$username$uidPart (#$id)';
+        _myUserId = id;
+        _identity = id == null
+            ? '$username$uidPart'
+            : '$username$uidPart (#$id)';
       });
     } catch (_) {
       setState(() {
@@ -910,13 +1166,17 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!force && !autoCheck) return;
 
     final updateChannel = prefs.getString(kPrefUpdateChannel) ?? 'stable';
-    final notificationsEnabled = prefs.getBool(kPrefUpdateNotifications) ?? true;
+    final notificationsEnabled =
+        prefs.getBool(kPrefUpdateNotifications) ?? true;
 
     setState(() => _checkingUpdates = true);
     try {
       final info = await PackageInfo.fromPlatform();
       final currentVersion = '${info.version}+${info.buildNumber}';
-      final release = await _api.latestRelease(platform, channel: updateChannel);
+      final release = await _api.latestRelease(
+        platform,
+        channel: updateChannel,
+      );
 
       setState(() {
         _currentVersion = currentVersion;
@@ -1034,7 +1294,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      ChatsPage(api: _api),
+      ChatsPage(api: _api, currentUserId: _myUserId),
       CustomizationPage(api: _api),
     ];
 
@@ -1042,7 +1302,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('AstraLink'),
+        titleSpacing: 16,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(_tab == 0 ? 'Chats' : 'Settings'),
+            Text(
+              _identity,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
         actions: [
           if (_checkingUpdates)
             const Padding(
@@ -1078,27 +1353,8 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           child: Column(
             children: [
-              _SectionCard(
-                child: Row(
-                  children: [
-                    Icon(Icons.verified_user_outlined, color: theme.colorScheme.primary),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        _identity,
-                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
               Expanded(
-                child: IndexedStack(
-                  index: _tab,
-                  children: pages,
-                ),
+                child: IndexedStack(index: _tab, children: pages),
               ),
             ],
           ),
@@ -1123,9 +1379,11 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
+
 class ChatsPage extends StatefulWidget {
   final ApiClient api;
-  const ChatsPage({super.key, required this.api});
+  final int? currentUserId;
+  const ChatsPage({super.key, required this.api, required this.currentUserId});
 
   @override
   State<ChatsPage> createState() => _ChatsPageState();
@@ -1175,7 +1433,8 @@ class _ChatsPageState extends State<ChatsPage> {
     try {
       final chats = await widget.api.chats();
       int? nextActive = _activeChatId;
-      if (nextActive != null && !chats.any((chat) => _asInt(chat['id']) == nextActive)) {
+      if (nextActive != null &&
+          !chats.any((chat) => _asInt(chat['id']) == nextActive)) {
         nextActive = null;
       }
       nextActive ??= chats.isNotEmpty ? _asInt(chats.first['id']) : null;
@@ -1272,9 +1531,10 @@ class _ChatsPageState extends State<ChatsPage> {
 
   void _show(Object error) {
     if (!mounted) return;
+    final message = error is ApiException ? error.message : error.toString();
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text(error.toString())));
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   List<Map<String, dynamic>> get _visibleChats {
@@ -1282,7 +1542,8 @@ class _ChatsPageState extends State<ChatsPage> {
     if (query.isEmpty) return _chats;
     return _chats.where((chat) {
       final title = chat['title']?.toString().toLowerCase() ?? '';
-      final lastMessage = chat['last_message_preview']?.toString().toLowerCase() ?? '';
+      final lastMessage =
+          chat['last_message_preview']?.toString().toLowerCase() ?? '';
       return title.contains(query) || lastMessage.contains(query);
     }).toList();
   }
@@ -1317,6 +1578,7 @@ class _ChatsPageState extends State<ChatsPage> {
     }
 
     return ListView.builder(
+      padding: const EdgeInsets.only(top: 4, bottom: 8),
       itemCount: chats.length,
       itemBuilder: (context, index) {
         final chat = chats[index];
@@ -1324,97 +1586,201 @@ class _ChatsPageState extends State<ChatsPage> {
         if (chatId == null) return const SizedBox.shrink();
         final selected = _activeChatId == chatId;
         final title = chat['title']?.toString() ?? 'Untitled';
-        final preview = chat['last_message_preview']?.toString() ??
+        final preview =
+            chat['last_message_preview']?.toString() ??
             chat['description']?.toString() ??
             'No messages yet';
         final unread = _asInt(chat['unread_count']) ?? 0;
         final timeText = _formatLastTime(chat['last_message_at']);
         final avatarText = title.isNotEmpty ? title[0].toUpperCase() : '?';
 
-        return InkWell(
-          onTap: () => _loadMessages(chatId),
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 6),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-            decoration: BoxDecoration(
-              color: selected ? const Color(0xFFEAF4F8) : Colors.transparent,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  radius: 22,
-                  backgroundColor: const Color(0xFFD7E8EE),
-                  child: Text(
-                    avatarText,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: const Color(0xFF2F6D84),
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          margin: const EdgeInsets.only(bottom: 4),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFEAF4F8) : Colors.transparent,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: InkWell(
+            onTap: () => _loadMessages(chatId),
+            borderRadius: BorderRadius.circular(16),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 24,
+                    backgroundColor: const Color(0xFFD7E8EE),
+                    child: Text(
+                      avatarText,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: const Color(0xFF2F6D84),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.titleSmall?.copyWith(
-                                fontWeight: FontWeight.w600,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
+                            if (timeText.isNotEmpty)
+                              Text(
+                                timeText,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          preview,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
                           ),
-                          if (timeText.isNotEmpty)
-                            Text(
-                              timeText,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                        ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (unread > 0) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
                       ),
-                      const SizedBox(height: 2),
-                      Text(
-                        preview,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        unread > 99 ? '99+' : '$unread',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 11,
                         ),
                       ),
-                    ],
-                  ),
-                ),
-                if (unread > 0) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF2F6D84),
-                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Text(
-                      unread > 99 ? '99+' : '$unread',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _buildChatTools(BuildContext context) {
+    final theme = Theme.of(context);
+    final canCreateGroup =
+        _newChatController.text.trim().isNotEmpty &&
+        _parseMemberIds().isNotEmpty;
+    final canFindUid = _uidSearchController.text.trim().isNotEmpty;
+
+    return _SectionCard(
+      child: Theme(
+        data: theme.copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: const EdgeInsets.only(top: 8),
+          title: Text(
+            'Chat tools',
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          subtitle: Text(
+            'Start by UID or create a group',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          children: [
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                SizedBox(
+                  width: 240,
+                  child: TextField(
+                    controller: _uidSearchController,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'Find by UID (@uid)',
+                      prefixIcon: Icon(Icons.person_search_rounded),
+                    ),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _uidLookupLoading || !canFindUid
+                      ? null
+                      : _findUserByUid,
+                  icon: const Icon(Icons.search_rounded),
+                  label: const Text('Find'),
+                ),
+                if (_uidResult != null)
+                  OutlinedButton.icon(
+                    onPressed: _startPrivateFromUid,
+                    icon: const Icon(Icons.chat_bubble_outline_rounded),
+                    label: Text('Chat with ${_uidResult!['username']}'),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                SizedBox(
+                  width: 240,
+                  child: TextField(
+                    controller: _newChatController,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'Group title',
+                      prefixIcon: Icon(Icons.group_outlined),
+                    ),
+                  ),
+                ),
+                SizedBox(
+                  width: 240,
+                  child: TextField(
+                    controller: _newMembersController,
+                    onChanged: (_) => setState(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'Member IDs (2,3)',
+                      prefixIcon: Icon(Icons.tag_rounded),
+                    ),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: canCreateGroup ? _createChat : null,
+                  icon: const Icon(Icons.group_add_outlined),
+                  label: const Text('Create group'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1433,28 +1799,56 @@ class _ChatsPageState extends State<ChatsPage> {
                   ),
                 )
               : _messages.isEmpty
-                  ? Center(
-                      child: Text(
-                        'No messages yet',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: _messages.length,
-                      itemBuilder: (context, index) {
-                        final msg = _messages[index];
-                        final content = msg['content']?.toString() ?? '';
-                        final senderId = msg['sender_id']?.toString() ?? '';
-                        final status = msg['status']?.toString() ?? '';
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          padding: const EdgeInsets.all(12),
+              ? Center(
+                  child: Text(
+                    'No messages yet',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  itemCount: _messages.length,
+                  itemBuilder: (context, index) {
+                    final msg = _messages[index];
+                    final content = msg['content']?.toString() ?? '';
+                    final senderId = _asInt(msg['sender_id']);
+                    final status = msg['status']?.toString() ?? '';
+                    final sentAt = _formatLastTime(msg['created_at']);
+                    final isOwn =
+                        widget.currentUserId != null &&
+                        senderId == widget.currentUserId;
+
+                    final meta = <String>[
+                      senderId == null ? 'Unknown' : 'User $senderId',
+                    ];
+                    if (status.isNotEmpty) meta.add(status);
+                    if (sentAt.isNotEmpty) meta.add(sentAt);
+
+                    return Align(
+                      alignment: isOwn
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 430),
+                        child: Container(
+                          margin: EdgeInsets.only(
+                            bottom: 8,
+                            left: isOwn ? 34 : 0,
+                            right: isOwn ? 0 : 34,
+                          ),
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFF6FAFC),
+                            color: isOwn
+                                ? const Color(0xFFDDF0FA)
+                                : const Color(0xFFF6FAFC),
                             borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: const Color(0xFFE0EBEF)),
+                            border: Border.all(
+                              color: isOwn
+                                  ? const Color(0xFFC3DFED)
+                                  : const Color(0xFFE0EBEF),
+                            ),
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1462,33 +1856,52 @@ class _ChatsPageState extends State<ChatsPage> {
                               Text(content),
                               const SizedBox(height: 4),
                               Text(
-                                'sender $senderId${status.isNotEmpty ? ' • $status' : ''}',
+                                meta.join(' | '),
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
                                 ),
                               ),
                             ],
                           ),
-                        );
-                      },
-                    ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
         ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _messageController,
-                decoration: const InputDecoration(labelText: 'Message'),
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFFF3F8FA),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFFDDE8ED)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _messageController,
+                  onSubmitted: (_) => _sendMessage(),
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: 'Write a message',
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            FilledButton.icon(
-              onPressed: _sendMessage,
-              icon: const Icon(Icons.send_rounded),
-              label: const Text('Send'),
-            ),
-          ],
+              const SizedBox(width: 8),
+              FilledButton(
+                onPressed: _sendMessage,
+                style: FilledButton.styleFrom(
+                  shape: const CircleBorder(),
+                  padding: const EdgeInsets.all(14),
+                  minimumSize: const Size(46, 46),
+                ),
+                child: const Icon(Icons.send_rounded, size: 20),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1496,6 +1909,7 @@ class _ChatsPageState extends State<ChatsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.all(4),
       child: Column(
@@ -1508,68 +1922,28 @@ class _ChatsPageState extends State<ChatsPage> {
                     controller: _chatSearchController,
                     onChanged: (value) => setState(() => _chatQuery = value),
                     decoration: const InputDecoration(
-                      labelText: 'Search chats',
-                      prefixIcon: Icon(Icons.search),
+                      hintText: 'Search',
+                      prefixIcon: Icon(Icons.search_rounded),
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
-                OutlinedButton.icon(
+                FilledButton.tonalIcon(
                   onPressed: _loadChats,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Reload'),
+                  icon: _loading
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh_rounded),
+                  label: const Text('Refresh'),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 10),
-          _SectionCard(
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                SizedBox(
-                  width: 220,
-                  child: TextField(
-                    controller: _uidSearchController,
-                    decoration: const InputDecoration(labelText: 'Find by UID (@uid)'),
-                  ),
-                ),
-                FilledButton.icon(
-                  onPressed: _uidLookupLoading ? null : _findUserByUid,
-                  icon: const Icon(Icons.person_search),
-                  label: const Text('Find'),
-                ),
-                if (_uidResult != null)
-                  OutlinedButton.icon(
-                    onPressed: _startPrivateFromUid,
-                    icon: const Icon(Icons.chat_bubble_outline),
-                    label: Text('Chat with ${_uidResult!['username']}'),
-                  ),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 220,
-                  child: TextField(
-                    controller: _newChatController,
-                    decoration: const InputDecoration(labelText: 'Group title'),
-                  ),
-                ),
-                SizedBox(
-                  width: 220,
-                  child: TextField(
-                    controller: _newMembersController,
-                    decoration: const InputDecoration(labelText: 'Member IDs (2,3)'),
-                  ),
-                ),
-                FilledButton.icon(
-                  onPressed: _createChat,
-                  icon: const Icon(Icons.group_add_outlined),
-                  label: const Text('Create group'),
-                ),
-              ],
-            ),
-          ),
+          _buildChatTools(context),
           const SizedBox(height: 10),
           Expanded(
             child: LayoutBuilder(
@@ -1581,8 +1955,20 @@ class _ChatsPageState extends State<ChatsPage> {
                       Expanded(
                         flex: 4,
                         child: _SectionCard(
-                          padding: const EdgeInsets.all(8),
-                          child: _buildChatList(context),
+                          padding: const EdgeInsets.all(10),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Chats',
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Expanded(child: _buildChatList(context)),
+                            ],
+                          ),
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -1590,7 +1976,19 @@ class _ChatsPageState extends State<ChatsPage> {
                         flex: 6,
                         child: _SectionCard(
                           padding: const EdgeInsets.all(10),
-                          child: _buildThread(context),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Conversation',
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Expanded(child: _buildThread(context)),
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -1601,8 +1999,20 @@ class _ChatsPageState extends State<ChatsPage> {
                     Expanded(
                       flex: 5,
                       child: _SectionCard(
-                        padding: const EdgeInsets.all(8),
-                        child: _buildChatList(context),
+                        padding: const EdgeInsets.all(10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Chats',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Expanded(child: _buildChatList(context)),
+                          ],
+                        ),
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -1610,7 +2020,19 @@ class _ChatsPageState extends State<ChatsPage> {
                       flex: 6,
                       child: _SectionCard(
                         padding: const EdgeInsets.all(10),
-                        child: _buildThread(context),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Conversation',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Expanded(child: _buildThread(context)),
+                          ],
+                        ),
                       ),
                     ),
                   ],
@@ -1623,6 +2045,7 @@ class _ChatsPageState extends State<ChatsPage> {
     );
   }
 }
+
 class FeedPage extends StatefulWidget {
   final ApiClient api;
   const FeedPage({super.key, required this.api});
@@ -1695,18 +2118,30 @@ class _FeedPageState extends State<FeedPage> {
                   controller: _postController,
                   minLines: 2,
                   maxLines: 4,
-                  decoration: const InputDecoration(labelText: 'Share an update'),
+                  decoration: const InputDecoration(
+                    labelText: 'Share an update',
+                  ),
                 ),
                 const SizedBox(height: 10),
                 Row(
                   children: [
                     DropdownButton<String>(
                       value: _visibility,
-                      onChanged: (value) => setState(() => _visibility = value ?? 'public'),
+                      onChanged: (value) =>
+                          setState(() => _visibility = value ?? 'public'),
                       items: const [
-                        DropdownMenuItem(value: 'public', child: Text('public')),
-                        DropdownMenuItem(value: 'followers', child: Text('followers')),
-                        DropdownMenuItem(value: 'private', child: Text('private')),
+                        DropdownMenuItem(
+                          value: 'public',
+                          child: Text('public'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'followers',
+                          child: Text('followers'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'private',
+                          child: Text('private'),
+                        ),
                       ],
                     ),
                     const Spacer(),
@@ -1733,42 +2168,42 @@ class _FeedPageState extends State<FeedPage> {
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
                   : _feed.isEmpty
-                      ? Center(
-                          child: Text(
-                            'Feed is empty',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        )
-                      : ListView.builder(
-                          itemCount: _feed.length,
-                          itemBuilder: (context, index) {
-                            final post = _feed[index];
-                            return Container(
-                              margin: const EdgeInsets.only(bottom: 10),
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFF6FAFC),
-                                borderRadius: BorderRadius.circular(14),
-                                border: Border.all(color: const Color(0xFFE0EBEF)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(post['content']?.toString() ?? ''),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    'author ${post['author_id']} • ${post['visibility']}',
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
+                  ? Center(
+                      child: Text(
+                        'Feed is empty',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
                         ),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: _feed.length,
+                      itemBuilder: (context, index) {
+                        final post = _feed[index];
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF6FAFC),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: const Color(0xFFE0EBEF)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(post['content']?.toString() ?? ''),
+                              const SizedBox(height: 6),
+                              Text(
+                                'author ${post['author_id']} • ${post['visibility']}',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
             ),
           ),
         ],
@@ -1857,17 +2292,26 @@ class _CustomizationPageState extends State<CustomizationPage> {
 
   void _show(Object message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message.toString())));
+    final text = message is ApiException ? message.message : message.toString();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Color? _parseAccentColor(String raw) {
+    final normalized = raw.trim().replaceAll('#', '');
+    if (normalized.length != 6 && normalized.length != 8) return null;
+    final prefixed = normalized.length == 6 ? 'FF$normalized' : normalized;
+    final value = int.tryParse(prefixed, radix: 16);
+    if (value == null) return null;
+    return Color(value);
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final accentPreview = _parseAccentColor(_accentController.text);
     return Padding(
       padding: const EdgeInsets.all(4),
-      child: _loading
+      child: _loading && _settings == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               children: [
@@ -1875,36 +2319,65 @@ class _CustomizationPageState extends State<CustomizationPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      Text(
+                        'Profile and appearance',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       TextField(
                         controller: _uidController,
                         decoration: const InputDecoration(
-                          labelText: 'UID (findable ID, example: astra_link01)',
+                          labelText: 'UID (example: astra_link01)',
+                          prefixIcon: Icon(Icons.alternate_email_rounded),
                         ),
                       ),
                       const SizedBox(height: 12),
                       TextField(
                         controller: _themeController,
-                        decoration: const InputDecoration(labelText: 'Theme name'),
+                        onChanged: (_) => setState(() {}),
+                        decoration: const InputDecoration(
+                          labelText: 'Theme name',
+                          prefixIcon: Icon(Icons.brush_outlined),
+                        ),
                       ),
                       const SizedBox(height: 12),
                       TextField(
                         controller: _accentController,
-                        decoration: const InputDecoration(
+                        onChanged: (_) => setState(() {}),
+                        decoration: InputDecoration(
                           labelText: 'Accent color (#2F6D84)',
+                          prefixIcon: const Icon(Icons.palette_outlined),
+                          suffixIcon: accentPreview == null
+                              ? null
+                              : Container(
+                                  width: 20,
+                                  height: 20,
+                                  margin: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: accentPreview,
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: const Color(0xFFCCD7DD),
+                                    ),
+                                  ),
+                                ),
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      Row(
+                      const SizedBox(height: 14),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
                         children: [
                           FilledButton.icon(
-                            onPressed: _save,
+                            onPressed: _loading ? null : _save,
                             icon: const Icon(Icons.save_outlined),
-                            label: const Text('Save'),
+                            label: const Text('Save changes'),
                           ),
-                          const SizedBox(width: 8),
                           OutlinedButton.icon(
-                            onPressed: _load,
-                            icon: const Icon(Icons.refresh),
+                            onPressed: _loading ? null : _load,
+                            icon: const Icon(Icons.refresh_rounded),
                             label: const Text('Reload'),
                           ),
                         ],
@@ -1918,15 +2391,22 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Updates',
-                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                        'Update behavior',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                       const SizedBox(height: 10),
                       DropdownButtonFormField<String>(
                         initialValue: _updateChannel,
-                        decoration: const InputDecoration(labelText: 'Update channel'),
+                        decoration: const InputDecoration(
+                          labelText: 'Update channel',
+                        ),
                         items: const [
-                          DropdownMenuItem(value: 'stable', child: Text('stable')),
+                          DropdownMenuItem(
+                            value: 'stable',
+                            child: Text('stable'),
+                          ),
                           DropdownMenuItem(value: 'beta', child: Text('beta')),
                         ],
                         onChanged: (value) {
@@ -1934,23 +2414,25 @@ class _CustomizationPageState extends State<CustomizationPage> {
                           setState(() => _updateChannel = value);
                         },
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       SwitchListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Auto-check updates on startup'),
                         value: _autoUpdateCheck,
-                        onChanged: (value) => setState(() => _autoUpdateCheck = value),
+                        onChanged: (value) =>
+                            setState(() => _autoUpdateCheck = value),
                       ),
                       SwitchListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Show update notifications'),
                         value: _updateNotifications,
-                        onChanged: (value) => setState(() => _updateNotifications = value),
+                        onChanged: (value) =>
+                            setState(() => _updateNotifications = value),
                       ),
                       Text(
-                        'To check immediately, use the refresh icon in the top bar.',
+                        'Manual check is always available from the top app bar.',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
@@ -1964,13 +2446,26 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Current profile settings',
-                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                        'Stored customization payload',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                       const SizedBox(height: 8),
-                      SelectableText(
-                        const JsonEncoder.withIndent('  ').convert(_settings ?? {}),
-                        style: theme.textTheme.bodySmall,
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF5F9FB),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFFDCE7ED)),
+                        ),
+                        child: SelectableText(
+                          const JsonEncoder.withIndent(
+                            '  ',
+                          ).convert(_settings ?? {}),
+                          style: theme.textTheme.bodySmall,
+                        ),
                       ),
                     ],
                   ),
@@ -1993,12 +2488,7 @@ class _SectionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Padding(
-        padding: padding,
-        child: child,
-      ),
+      child: Padding(padding: padding, child: child),
     );
   }
 }
-
-
