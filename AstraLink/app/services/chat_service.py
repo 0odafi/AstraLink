@@ -467,3 +467,7 @@ def can_access_chat(db: Session, chat_id: int, user_id: int) -> bool:
         )
     )
     return bool(public_chat)
+
+
+def chat_member_ids(db: Session, chat_id: int) -> set[int]:
+    return set(db.scalars(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id)).all())

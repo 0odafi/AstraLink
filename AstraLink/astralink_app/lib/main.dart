@@ -1453,7 +1453,7 @@ class _ChatsPageState extends State<ChatsPage> {
   final _newChatController = TextEditingController();
   final _newMembersController = TextEditingController();
   final _messageController = TextEditingController();
-  final Map<int, WebSocketChannel> _chatChannels = {};
+  WebSocketChannel? _globalChannel;
 
   List<Map<String, dynamic>> _chats = [];
   List<Map<String, dynamic>> _messages = [];
@@ -1464,6 +1464,7 @@ class _ChatsPageState extends State<ChatsPage> {
   bool _uidLookupLoading = false;
   bool _realtimeEnabled = true;
   Timer? _realtimeHeartbeatTimer;
+  Timer? _realtimeReconnectTimer;
   Timer? _chatsRefreshTimer;
   Timer? _activeThreadSyncTimer;
   Timer? _typingStopTimer;
@@ -1476,16 +1477,18 @@ class _ChatsPageState extends State<ChatsPage> {
   void initState() {
     super.initState();
     _startRealtimeHeartbeat();
+    _connectGlobalRealtime();
     _loadChats();
   }
 
   @override
   void dispose() {
     _realtimeHeartbeatTimer?.cancel();
+    _realtimeReconnectTimer?.cancel();
     _chatsRefreshTimer?.cancel();
     _activeThreadSyncTimer?.cancel();
     _typingStopTimer?.cancel();
-    _closeAllRealtime();
+    _closeGlobalRealtime(disableState: false);
     _chatSearchController.dispose();
     _uidSearchController.dispose();
     _newChatController.dispose();
@@ -1508,7 +1511,7 @@ class _ChatsPageState extends State<ChatsPage> {
     return token;
   }
 
-  Uri _chatWsUri(int chatId, String token) {
+  Uri _globalWsUri(String token) {
     final normalized = widget.api.baseUrl.endsWith('/')
         ? widget.api.baseUrl.substring(0, widget.api.baseUrl.length - 1)
         : widget.api.baseUrl;
@@ -1516,7 +1519,7 @@ class _ChatsPageState extends State<ChatsPage> {
     final scheme = httpUri.scheme == 'https' ? 'wss' : 'ws';
     return httpUri.replace(
       scheme: scheme,
-      path: '/api/realtime/chats/$chatId/ws',
+      path: '/api/realtime/me/ws',
       queryParameters: {'token': token},
     );
   }
@@ -1524,38 +1527,66 @@ class _ChatsPageState extends State<ChatsPage> {
   void _startRealtimeHeartbeat() {
     _realtimeHeartbeatTimer?.cancel();
     _realtimeHeartbeatTimer = Timer.periodic(const Duration(seconds: 25), (_) {
-      for (final channel in _chatChannels.values) {
-        try {
-          channel.sink.add(jsonEncode({'type': 'ping'}));
-        } catch (_) {
-          // Ignore ping failures; reconnect handler covers broken sockets.
-        }
+      final channel = _globalChannel;
+      if (channel == null) return;
+      try {
+        channel.sink.add(jsonEncode({'type': 'ping'}));
+      } catch (_) {
+        // Ignore ping failures; reconnect handler covers broken sockets.
       }
     });
   }
 
-  void _closeRealtime(int chatId) {
-    final channel = _chatChannels.remove(chatId);
+  void _closeGlobalRealtime({bool disableState = true}) {
+    final channel = _globalChannel;
+    _globalChannel = null;
     channel?.sink.close();
-    if (mounted && _chatChannels.isEmpty && _realtimeEnabled) {
+    if (disableState && mounted && _realtimeEnabled) {
       setState(() => _realtimeEnabled = false);
     }
   }
 
-  void _closeAllRealtime() {
-    final chatIds = _chatChannels.keys.toList();
-    for (final chatId in chatIds) {
-      _closeRealtime(chatId);
-    }
+  void _scheduleGlobalReconnect() {
+    if (_realtimeReconnectTimer?.isActive == true) return;
+    _realtimeReconnectTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      _realtimeReconnectTimer = null;
+      _connectGlobalRealtime();
+    });
   }
 
-  void _scheduleRealtimeReconnect(int chatId) {
-    Future<void>.delayed(const Duration(seconds: 3), () {
-      if (!mounted) return;
-      final stillNeeded = _chats.any((chat) => _asInt(chat['id']) == chatId);
-      if (!stillNeeded || _chatChannels.containsKey(chatId)) return;
-      _subscribeRealtime(chatId);
-    });
+  void _connectGlobalRealtime() {
+    if (_globalChannel != null) return;
+    final token = _accessToken();
+    if (token == null) {
+      if (mounted && _realtimeEnabled) {
+        setState(() => _realtimeEnabled = false);
+      }
+      return;
+    }
+
+    try {
+      final channel = WebSocketChannel.connect(_globalWsUri(token));
+      _globalChannel = channel;
+      if (mounted && !_realtimeEnabled) {
+        setState(() => _realtimeEnabled = true);
+      }
+
+      channel.stream.listen(
+        _handleRealtimeEvent,
+        onError: (_) {
+          _closeGlobalRealtime();
+          _scheduleGlobalReconnect();
+        },
+        onDone: () {
+          _closeGlobalRealtime();
+          _scheduleGlobalReconnect();
+        },
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _scheduleGlobalReconnect();
+    }
   }
 
   void _upsertMessage(Map<String, dynamic> incoming) {
@@ -1657,10 +1688,16 @@ class _ChatsPageState extends State<ChatsPage> {
   }
 
   void _sendRealtimeTyping(int chatId, bool isTyping) {
-    final channel = _chatChannels[chatId];
+    final channel = _globalChannel;
     if (channel == null) return;
     try {
-      channel.sink.add(jsonEncode({'type': 'typing', 'is_typing': isTyping}));
+      channel.sink.add(
+        jsonEncode({
+          'type': 'typing',
+          'chat_id': chatId,
+          'is_typing': isTyping,
+        }),
+      );
     } catch (_) {
       // Ignore typing send failures.
     }
@@ -1698,7 +1735,7 @@ class _ChatsPageState extends State<ChatsPage> {
     }
   }
 
-  void _handleRealtimeEvent(int socketChatId, dynamic rawEvent) {
+  void _handleRealtimeEvent(dynamic rawEvent) {
     dynamic payload;
     if (rawEvent is String) {
       try {
@@ -1715,7 +1752,7 @@ class _ChatsPageState extends State<ChatsPage> {
     if (payload is! Map) return;
     final data = Map<String, dynamic>.from(payload);
     final eventType = data['type']?.toString() ?? '';
-    final eventChatId = _asInt(data['chat_id']) ?? socketChatId;
+    final eventChatId = _asInt(data['chat_id']);
 
     switch (eventType) {
       case 'ready':
@@ -1725,7 +1762,7 @@ class _ChatsPageState extends State<ChatsPage> {
         }
         break;
       case 'presence':
-        if (eventChatId != _activeChatId) break;
+        if (eventChatId == null || eventChatId != _activeChatId) break;
         final userId = _asInt(data['user_id']);
         final status = data['status']?.toString() ?? 'offline';
         if (userId != null && userId != widget.currentUserId) {
@@ -1741,7 +1778,7 @@ class _ChatsPageState extends State<ChatsPage> {
         }
         break;
       case 'typing':
-        if (eventChatId != _activeChatId) break;
+        if (eventChatId == null || eventChatId != _activeChatId) break;
         final userId = _asInt(data['user_id']);
         final isTyping = data['is_typing'] == true;
         if (userId != null && userId != widget.currentUserId) {
@@ -1757,15 +1794,18 @@ class _ChatsPageState extends State<ChatsPage> {
         final messageRaw = data['message'];
         if (messageRaw is! Map) break;
         final message = Map<String, dynamic>.from(messageRaw);
-        if (eventChatId == _activeChatId) {
+        final messageChatId = _asInt(message['chat_id']) ?? eventChatId;
+        if (messageChatId != null && messageChatId == _activeChatId) {
           _upsertMessage(message);
-          _scheduleActiveThreadSync(eventChatId);
+          _scheduleActiveThreadSync(messageChatId);
         }
         _scheduleChatsRefresh();
         break;
       case 'message_deleted':
         final messageId = _asInt(data['message_id']);
-        if (messageId != null && eventChatId == _activeChatId) {
+        if (messageId != null &&
+            eventChatId != null &&
+            eventChatId == _activeChatId) {
           _removeMessage(messageId);
         }
         _scheduleChatsRefresh();
@@ -1775,7 +1815,10 @@ class _ChatsPageState extends State<ChatsPage> {
         final messageId = _asInt(data['message_id']);
         final userId = _asInt(data['user_id']);
         final emoji = data['emoji']?.toString();
-        if (messageId != null && emoji != null && emoji.isNotEmpty) {
+        if (messageId != null &&
+            eventChatId != null &&
+            emoji != null &&
+            emoji.isNotEmpty) {
           final added = eventType == 'reaction_added';
           _applyLocalReaction(
             messageId,
@@ -1792,59 +1835,11 @@ class _ChatsPageState extends State<ChatsPage> {
     }
   }
 
-  void _subscribeRealtime(int chatId) {
-    if (_chatChannels.containsKey(chatId)) return;
-    final token = _accessToken();
-    if (token == null) {
-      if (mounted && _realtimeEnabled) {
-        setState(() => _realtimeEnabled = false);
-      }
-      return;
-    }
-
-    try {
-      final channel = WebSocketChannel.connect(_chatWsUri(chatId, token));
-      _chatChannels[chatId] = channel;
-      if (mounted && !_realtimeEnabled) {
-        setState(() => _realtimeEnabled = true);
-      }
-
-      channel.stream.listen(
-        (event) => _handleRealtimeEvent(chatId, event),
-        onError: (_) {
-          _closeRealtime(chatId);
-          _scheduleRealtimeReconnect(chatId);
-        },
-        onDone: () {
-          _closeRealtime(chatId);
-          _scheduleRealtimeReconnect(chatId);
-        },
-        cancelOnError: true,
-      );
-    } catch (_) {
-      _scheduleRealtimeReconnect(chatId);
-    }
-  }
-
-  void _syncRealtimeSubscriptions() {
-    final desired = _chats
-        .map((chat) => _asInt(chat['id']))
-        .whereType<int>()
-        .toSet();
-    final current = _chatChannels.keys.toSet();
-
-    for (final chatId in current.difference(desired)) {
-      _closeRealtime(chatId);
-    }
-    for (final chatId in desired.difference(current)) {
-      _subscribeRealtime(chatId);
-    }
-  }
-
   Future<void> _loadChats({
     bool loadActiveMessages = true,
     bool silent = false,
   }) async {
+    _connectGlobalRealtime();
     if (!silent && mounted) {
       setState(() => _loading = true);
     }
@@ -1861,7 +1856,6 @@ class _ChatsPageState extends State<ChatsPage> {
         _chats = chats;
         _activeChatId = nextActive;
       });
-      _syncRealtimeSubscriptions();
 
       if (nextActive != null && loadActiveMessages) {
         await _loadMessages(nextActive);

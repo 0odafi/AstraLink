@@ -1,11 +1,155 @@
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
 from app.api.deps import get_current_user_from_raw_token
 from app.core.database import SessionLocal
-from app.realtime.manager import chat_manager
-from app.services.chat_service import can_access_chat, create_message, serialize_messages
+from app.models.chat import ChatMember
+from app.realtime.manager import chat_manager, user_realtime_manager
+from app.services.chat_service import can_access_chat, chat_member_ids, create_message, serialize_messages
 
 router = APIRouter(tags=["Realtime"])
+
+
+def _as_int(value: object) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _user_chat_ids(user_id: int) -> set[int]:
+    db = SessionLocal()
+    try:
+        return set(db.scalars(select(ChatMember.chat_id).where(ChatMember.user_id == user_id)).all())
+    finally:
+        db.close()
+
+
+async def _broadcast_chat_event(
+    chat_id: int,
+    payload: dict,
+    *,
+    exclude_chat_socket: WebSocket | None = None,
+) -> None:
+    await chat_manager.broadcast(chat_id, payload, exclude=exclude_chat_socket)
+
+    db = SessionLocal()
+    try:
+        member_ids = chat_member_ids(db, chat_id)
+    finally:
+        db.close()
+    await user_realtime_manager.broadcast_many(member_ids, payload)
+
+
+async def _broadcast_user_presence(user_id: int, status: str) -> None:
+    for chat_id in _user_chat_ids(user_id):
+        await _broadcast_chat_event(
+            chat_id,
+            {
+                "type": "presence",
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "status": status,
+            },
+        )
+
+
+@router.websocket("/me/ws")
+async def me_socket(
+    websocket: WebSocket,
+    token: str = Query(...),
+) -> None:
+    user = None
+    db = SessionLocal()
+    try:
+        user = get_current_user_from_raw_token(token, db)
+    except Exception:
+        await websocket.close(code=4401, reason="Invalid token")
+        return
+    finally:
+        db.close()
+
+    first_connection_for_user = await user_realtime_manager.connect(user.id, websocket)
+    await websocket.send_json({"type": "ready", "user_id": user.id})
+    if first_connection_for_user:
+        await _broadcast_user_presence(user.id, "online")
+
+    try:
+        while True:
+            incoming = await websocket.receive_json()
+            event_type = incoming.get("type")
+
+            if event_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            if event_type == "typing":
+                chat_id = _as_int(incoming.get("chat_id"))
+                if chat_id is None:
+                    await websocket.send_json({"type": "error", "message": "chat_id is required"})
+                    continue
+
+                db = SessionLocal()
+                try:
+                    if not can_access_chat(db, chat_id=chat_id, user_id=user.id):
+                        await websocket.send_json({"type": "error", "message": "Access denied"})
+                        continue
+                finally:
+                    db.close()
+
+                is_typing = bool(incoming.get("is_typing", True))
+                await _broadcast_chat_event(
+                    chat_id,
+                    {
+                        "type": "typing",
+                        "chat_id": chat_id,
+                        "user_id": user.id,
+                        "is_typing": is_typing,
+                    },
+                )
+                continue
+
+            if event_type == "message":
+                chat_id = _as_int(incoming.get("chat_id"))
+                content = str(incoming.get("content", "")).strip()
+                if chat_id is None:
+                    await websocket.send_json({"type": "error", "message": "chat_id is required"})
+                    continue
+                if not content:
+                    await websocket.send_json({"type": "error", "message": "Message content is empty"})
+                    continue
+
+                db = SessionLocal()
+                serialized = None
+                try:
+                    message = create_message(db, chat_id=chat_id, sender_id=user.id, content=content)
+                    serialized = serialize_messages(db, [message], user_id=user.id)[0]
+                except ValueError as exc:
+                    await websocket.send_json({"type": "error", "message": str(exc)})
+                    continue
+                finally:
+                    db.close()
+
+                if serialized is None:
+                    continue
+
+                await _broadcast_chat_event(
+                    chat_id,
+                    {
+                        "type": "message",
+                        "chat_id": chat_id,
+                        "message": serialized.model_dump(mode="json"),
+                    },
+                )
+                continue
+
+            await websocket.send_json({"type": "error", "message": "Unknown event type"})
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _, last_connection_for_user = user_realtime_manager.disconnect(user.id, websocket)
+        if last_connection_for_user:
+            await _broadcast_user_presence(user.id, "offline")
 
 
 @router.websocket("/chats/{chat_id}/ws")
@@ -30,10 +174,10 @@ async def chat_socket(
     first_connection_for_user = await chat_manager.connect(chat_id, websocket, user.id)
     await websocket.send_json({"type": "ready", "chat_id": chat_id, "user_id": user.id})
     if first_connection_for_user:
-        await chat_manager.broadcast(
+        await _broadcast_chat_event(
             chat_id,
             {"type": "presence", "chat_id": chat_id, "user_id": user.id, "status": "online"},
-            exclude=websocket,
+            exclude_chat_socket=websocket,
         )
 
     try:
@@ -47,7 +191,7 @@ async def chat_socket(
 
             if event_type == "typing":
                 is_typing = bool(incoming.get("is_typing", True))
-                await chat_manager.broadcast(
+                await _broadcast_chat_event(
                     chat_id,
                     {
                         "type": "typing",
@@ -55,7 +199,7 @@ async def chat_socket(
                         "user_id": user.id,
                         "is_typing": is_typing,
                     },
-                    exclude=websocket,
+                    exclude_chat_socket=websocket,
                 )
                 continue
 
@@ -83,13 +227,16 @@ async def chat_socket(
                 continue
 
             payload = serialized.model_dump(mode="json")
-            await chat_manager.broadcast(chat_id, {"type": "message", "chat_id": chat_id, "message": payload})
+            await _broadcast_chat_event(
+                chat_id,
+                {"type": "message", "chat_id": chat_id, "message": payload},
+            )
     except (WebSocketDisconnect, Exception):
         pass
     finally:
         disconnected_user_id, last_connection_for_user = chat_manager.disconnect(chat_id, websocket)
         if disconnected_user_id is not None and last_connection_for_user:
-            await chat_manager.broadcast(
+            await _broadcast_chat_event(
                 chat_id,
                 {
                     "type": "presence",

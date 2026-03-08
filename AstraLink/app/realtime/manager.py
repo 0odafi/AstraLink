@@ -50,3 +50,46 @@ class ChatConnectionManager:
 
 
 chat_manager = ChatConnectionManager()
+
+
+class UserConnectionManager:
+    def __init__(self) -> None:
+        self._connections: dict[int, set[WebSocket]] = defaultdict(set)
+
+    async def connect(self, user_id: int, websocket: WebSocket) -> bool:
+        sockets = self._connections[user_id]
+        is_first_connection = not sockets
+        await websocket.accept()
+        sockets.add(websocket)
+        return is_first_connection
+
+    def disconnect(self, user_id: int, websocket: WebSocket) -> tuple[bool, bool]:
+        sockets = self._connections.get(user_id)
+        if not sockets:
+            return False, False
+
+        was_connected = websocket in sockets
+        sockets.discard(websocket)
+        if not sockets:
+            del self._connections[user_id]
+            return was_connected, True
+        return was_connected, False
+
+    async def broadcast(self, user_id: int, payload: dict) -> None:
+        dead_connections: list[WebSocket] = []
+        sockets = self._connections.get(user_id, set())
+        for socket in sockets:
+            try:
+                await socket.send_json(payload)
+            except Exception:
+                dead_connections.append(socket)
+
+        for socket in dead_connections:
+            self.disconnect(user_id, socket)
+
+    async def broadcast_many(self, user_ids: set[int], payload: dict) -> None:
+        for user_id in user_ids:
+            await self.broadcast(user_id, payload)
+
+
+user_realtime_manager = UserConnectionManager()

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.models.chat import Message
 from app.models.user import User
-from app.realtime.manager import chat_manager
+from app.realtime.manager import chat_manager, user_realtime_manager
 from app.schemas.chat import (
     ChatCreate,
     ChatMemberAdd,
@@ -18,6 +18,7 @@ from app.schemas.chat import (
 )
 from app.services.chat_service import (
     add_member,
+    chat_member_ids,
     create_chat,
     create_message,
     delete_message,
@@ -33,6 +34,11 @@ from app.services.chat_service import (
 )
 
 router = APIRouter(prefix="/chats", tags=["Chats"])
+
+
+async def _broadcast_chat_event(db: Session, chat_id: int, payload: dict) -> None:
+    await chat_manager.broadcast(chat_id, payload)
+    await user_realtime_manager.broadcast_many(chat_member_ids(db, chat_id), payload)
 
 
 @router.post("", response_model=ChatOut, status_code=status.HTTP_201_CREATED)
@@ -132,7 +138,8 @@ async def post_message(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     serialized = serialize_messages(db, [message], user_id=current_user.id)[0]
-    await chat_manager.broadcast(
+    await _broadcast_chat_event(
+        db,
         chat_id,
         {
             "type": "message",
@@ -156,7 +163,8 @@ async def patch_message(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     serialized = serialize_messages(db, [message], user_id=current_user.id)[0]
-    await chat_manager.broadcast(
+    await _broadcast_chat_event(
+        db,
         message.chat_id,
         {
             "type": "message_updated",
@@ -181,7 +189,8 @@ async def remove_message(
     if removed_chat_id is None:
         return {"message_id": message_id, "removed": False}
 
-    await chat_manager.broadcast(
+    await _broadcast_chat_event(
+        db,
         removed_chat_id,
         {
             "type": "message_deleted",
@@ -204,7 +213,8 @@ async def pin_chat_message(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    await chat_manager.broadcast(
+    await _broadcast_chat_event(
+        db,
         chat_id,
         {
             "type": "message_pinned",
@@ -228,7 +238,8 @@ async def unpin_chat_message(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if removed:
-        await chat_manager.broadcast(
+        await _broadcast_chat_event(
+            db,
             chat_id,
             {
                 "type": "message_unpinned",
@@ -253,7 +264,8 @@ async def add_message_reaction(
     message = db.scalar(select(Message).where(Message.id == message_id))
     chat_id = message.chat_id if message else None
     if chat_id is not None:
-        await chat_manager.broadcast(
+        await _broadcast_chat_event(
+            db,
             chat_id,
             {
                 "type": "reaction_added",
@@ -283,7 +295,8 @@ async def delete_message_reaction(
     chat_id = message.chat_id if message else None
     removed = remove_message_reaction(db, message_id=message_id, user_id=current_user.id, emoji=emoji)
     if removed and chat_id is not None:
-        await chat_manager.broadcast(
+        await _broadcast_chat_event(
+            db,
             chat_id,
             {
                 "type": "reaction_removed",
