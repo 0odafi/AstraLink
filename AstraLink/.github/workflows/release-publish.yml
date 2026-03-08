@@ -91,16 +91,24 @@ jobs:
       - run: flutter pub get
       - run: flutter build apk --release
       - run: flutter build appbundle --release
+      - name: Prepare android artifacts
+        run: |
+          mkdir -p ../release_android
+          cp build/app/outputs/flutter-apk/app-release.apk ../release_android/app-release.apk
+          cp build/app/outputs/bundle/release/app-release.aab ../release_android/app-release.aab
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
-          path: |
-            astralink_app/build/app/outputs/flutter-apk/app-release.apk
-            astralink_app/build/app/outputs/bundle/release/app-release.aab
+          path: release_android/*
 
   publish:
     needs: [resolve, build_windows, build_android]
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: 87.120.84.205
+      DEPLOY_USER: root
+      DEPLOY_PORT: "22"
+      RELEASES_PATH: /opt/astralink/releases
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -111,6 +119,13 @@ jobs:
         with:
           name: android-release
           path: artifacts/android
+      - name: Validate downloaded artifacts
+        run: |
+          ls -la artifacts/windows
+          ls -la artifacts/android
+          test -f "artifacts/windows/astralink_windows_${{ needs.resolve.outputs.safe_version }}.zip"
+          test -f "artifacts/android/app-release.apk"
+          test -f "artifacts/android/app-release.aab"
       - name: Prepare release payload
         run: |
           VERSION="${{ needs.resolve.outputs.version }}"
@@ -149,19 +164,20 @@ jobs:
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" | tr -d '\r' > ~/.ssh/id_ed25519
+          if ! grep -q "BEGIN .* PRIVATE KEY" ~/.ssh/id_ed25519; then
+            echo "DEPLOY_SSH_KEY is invalid. Put full private key (BEGIN/END), without passphrase."
+            exit 1
+          fi
           chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${{ env.DEPLOY_PORT }}" "${{ env.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
       - name: Upload release files to server
         run: |
           VERSION="${{ needs.resolve.outputs.version }}"
-          HOST="87.120.84.205"
-          USER="root"
-          PORT="22"
-          RELEASES_PATH="/opt/astralink/releases"
-          ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" "mkdir -p '$RELEASES_PATH/astralink/windows/$VERSION' '$RELEASES_PATH/astralink/android/$VERSION'"
-          scp -P "$PORT" -o StrictHostKeyChecking=no "publish/astralink/windows/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/windows/$VERSION/"
-          scp -P "$PORT" -o StrictHostKeyChecking=no "publish/astralink/android/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/android/$VERSION/"
-          scp -P "$PORT" -o StrictHostKeyChecking=no "publish/manifest.json" "$USER@$HOST:$RELEASES_PATH/manifest.json"
+          ssh -p "${{ env.DEPLOY_PORT }}" "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" "mkdir -p '${{ env.RELEASES_PATH }}/astralink/windows/$VERSION' '${{ env.RELEASES_PATH }}/astralink/android/$VERSION'"
+          scp -P "${{ env.DEPLOY_PORT }}" "publish/astralink/windows/$VERSION/"* "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.RELEASES_PATH }}/astralink/windows/$VERSION/"
+          scp -P "${{ env.DEPLOY_PORT }}" "publish/astralink/android/$VERSION/"* "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.RELEASES_PATH }}/astralink/android/$VERSION/"
+          scp -P "${{ env.DEPLOY_PORT }}" "publish/manifest.json" "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.RELEASES_PATH }}/manifest.json"
       - name: Show summary
         run: |
           echo "Published version ${{ needs.resolve.outputs.version }}"
