@@ -95,21 +95,24 @@ jobs:
       - run: flutter pub get
       - run: flutter build apk --release --verbose
       - run: flutter build appbundle --release --verbose
-      - name: Collect Android artifacts
+      - name: Prepare Android artifacts
         run: |
-          mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk dist/app-release.apk
-          cp build/app/outputs/bundle/release/app-release.aab dist/app-release.aab
+          mkdir -p ../release_android
+          cp build/app/outputs/flutter-apk/app-release.apk ../release_android/app-release.apk
+          cp build/app/outputs/bundle/release/app-release.aab ../release_android/app-release.aab
       - uses: actions/upload-artifact@v4
         with:
           name: android-release
-          path: |
-            AstraLink/astralink_app/dist/app-release.apk
-            AstraLink/astralink_app/dist/app-release.aab
+          path: AstraLink/release_android/*
 
   publish:
     needs: [resolve, build_windows, build_android]
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: 87.120.84.205
+      DEPLOY_USER: root
+      DEPLOY_PORT: "22"
+      RELEASES_PATH: /opt/astralink/releases
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -120,11 +123,17 @@ jobs:
         with:
           name: android-release
           path: artifacts/android
+      - name: Validate downloaded artifacts
+        run: |
+          ls -la artifacts/windows
+          ls -la artifacts/android
+          test -f "artifacts/windows/astralink_windows_${{ needs.resolve.outputs.safe_version }}.zip"
+          test -f "artifacts/android/app-release.apk"
+          test -f "artifacts/android/app-release.aab"
       - name: Prepare release payload
         run: |
           VERSION="${{ needs.resolve.outputs.version }}"
           SAFE_VERSION="${{ needs.resolve.outputs.safe_version }}"
-          ls -R artifacts/android
           mkdir -p "publish/astralink/windows/$VERSION"
           mkdir -p "publish/astralink/android/$VERSION"
           cp "artifacts/windows/astralink_windows_${SAFE_VERSION}.zip" "publish/astralink/windows/$VERSION/astralink_windows_${SAFE_VERSION}.zip"
@@ -162,30 +171,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
-          if printf '%s' "$DEPLOY_SSH_KEY" | grep -q "BEGIN .*PRIVATE KEY"; then
-            # Supports secrets pasted as multiline key or with escaped \n.
-            printf '%s' "$DEPLOY_SSH_KEY" | sed 's/\\n/\n/g' | tr -d '\r' > ~/.ssh/id_ed25519
-          else
-            # Also supports base64-encoded private key in DEPLOY_SSH_KEY.
-            printf '%s' "$DEPLOY_SSH_KEY" | tr -d '\r' | base64 -d > ~/.ssh/id_ed25519
-          fi
-          chmod 600 ~/.ssh/id_ed25519
-          if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
+          printf '%s' "$DEPLOY_SSH_KEY" | sed 's/\\n/\n/g' | tr -d '\r' > ~/.ssh/id_ed25519
+          if ! grep -q "BEGIN .* PRIVATE KEY" ~/.ssh/id_ed25519; then
             echo "DEPLOY_SSH_KEY is invalid. Put full private key (BEGIN/END), without passphrase." >&2
             exit 1
           fi
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${{ env.DEPLOY_PORT }}" "${{ env.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
       - name: Upload release files to server
         run: |
           VERSION="${{ needs.resolve.outputs.version }}"
-          HOST="87.120.84.205"
-          USER="root"
-          PORT="22"
-          RELEASES_PATH="/opt/astralink/releases"
-          SSH_OPTS="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519"
-          ssh -p "$PORT" $SSH_OPTS "$USER@$HOST" "mkdir -p '$RELEASES_PATH/astralink/windows/$VERSION' '$RELEASES_PATH/astralink/android/$VERSION'"
-          scp -P "$PORT" $SSH_OPTS "publish/astralink/windows/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/windows/$VERSION/"
-          scp -P "$PORT" $SSH_OPTS "publish/astralink/android/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/android/$VERSION/"
-          scp -P "$PORT" $SSH_OPTS "publish/manifest.json" "$USER@$HOST:$RELEASES_PATH/manifest.json"
+          ssh -p "${{ env.DEPLOY_PORT }}" "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" "mkdir -p '${{ env.RELEASES_PATH }}/astralink/windows/$VERSION' '${{ env.RELEASES_PATH }}/astralink/android/$VERSION'"
+          scp -P "${{ env.DEPLOY_PORT }}" "publish/astralink/windows/$VERSION/"* "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.RELEASES_PATH }}/astralink/windows/$VERSION/"
+          scp -P "${{ env.DEPLOY_PORT }}" "publish/astralink/android/$VERSION/"* "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.RELEASES_PATH }}/astralink/android/$VERSION/"
+          scp -P "${{ env.DEPLOY_PORT }}" "publish/manifest.json" "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.RELEASES_PATH }}/manifest.json"
       - name: Show summary
         run: |
           echo "Published version ${{ needs.resolve.outputs.version }}"
