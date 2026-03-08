@@ -81,6 +81,14 @@ bool isVersionNewer(String candidate, String current) {
   return false;
 }
 
+extension AdaptiveUi on BuildContext {
+  double su(double value, {double minScale = 0.88, double maxScale = 1.16}) {
+    final shortest = MediaQuery.of(this).size.shortestSide;
+    final scale = (shortest / 390).clamp(minScale, maxScale).toDouble();
+    return value * scale;
+  }
+}
+
 class SessionTokens {
   final String accessToken;
   final String? refreshToken;
@@ -1483,6 +1491,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    double rs(double value) => context.su(value, minScale: 0.9, maxScale: 1.08);
+
     final pages = [
       ChatsPage(api: _api, currentUserId: _myUserId),
       ContactsPage(api: _api),
@@ -1582,11 +1592,11 @@ class _HomeScreenState extends State<HomeScreen> {
       bottomNavigationBar: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          padding: EdgeInsets.fromLTRB(rs(10), 0, rs(10), rs(10)),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(28),
+            borderRadius: BorderRadius.circular(rs(28)),
             child: NavigationBar(
-              height: 70,
+              height: rs(70).clamp(64, 80).toDouble(),
               selectedIndex: _tab,
               onDestinationSelected: (index) => setState(() => _tab = index),
               destinations: const [
@@ -2834,6 +2844,7 @@ class _ChatsPageState extends State<ChatsPage> {
   Widget _buildChatList(BuildContext context) {
     final theme = Theme.of(context);
     final chats = _visibleChats;
+    double rs(double value) => context.su(value);
 
     if (_loading && _chats.isEmpty) {
       return const Center(child: CircularProgressIndicator());
@@ -2850,7 +2861,7 @@ class _ChatsPageState extends State<ChatsPage> {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.only(top: 2, bottom: 8),
+      padding: EdgeInsets.only(top: rs(2), bottom: rs(8)),
       itemCount: chats.length,
       itemBuilder: (context, index) {
         final chat = chats[index];
@@ -2872,18 +2883,18 @@ class _ChatsPageState extends State<ChatsPage> {
 
         return InkWell(
           onTap: () => _loadMessages(chatId, openThread: true),
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(rs(14)),
           child: Container(
-            margin: const EdgeInsets.only(bottom: 2),
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+            margin: EdgeInsets.only(bottom: rs(2)),
+            padding: EdgeInsets.symmetric(horizontal: rs(6), vertical: rs(8)),
             decoration: BoxDecoration(
               color: selected ? const Color(0xFF1C2330) : Colors.transparent,
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(rs(14)),
             ),
             child: Row(
               children: [
                 CircleAvatar(
-                  radius: 25,
+                  radius: rs(25).clamp(22, 30).toDouble(),
                   backgroundColor: type == 'private'
                       ? const Color(0xFF3241A8)
                       : const Color(0xFF3A2D57),
@@ -2895,7 +2906,7 @@ class _ChatsPageState extends State<ChatsPage> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: rs(12)),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -2913,12 +2924,12 @@ class _ChatsPageState extends State<ChatsPage> {
                             ),
                           ),
                           if (muted)
-                            const Padding(
-                              padding: EdgeInsets.only(right: 6),
+                            Padding(
+                              padding: EdgeInsets.only(right: rs(6)),
                               child: Icon(
                                 Icons.notifications_off_rounded,
-                                color: Color(0xFF7D8498),
-                                size: 16,
+                                color: const Color(0xFF7D8498),
+                                size: rs(16),
                               ),
                             ),
                           if (timeText.isNotEmpty)
@@ -2930,16 +2941,16 @@ class _ChatsPageState extends State<ChatsPage> {
                             ),
                         ],
                       ),
-                      const SizedBox(height: 3),
+                      SizedBox(height: rs(3)),
                       Row(
                         children: [
                           if (lastStatus.isNotEmpty && type == 'private') ...[
                             Icon(
                               _messageStatusIcon(lastStatus),
-                              size: 15,
+                              size: rs(15),
                               color: const Color(0xFFA665EE),
                             ),
-                            const SizedBox(width: 4),
+                            SizedBox(width: rs(4)),
                           ],
                           Expanded(
                             child: Text(
@@ -2952,11 +2963,11 @@ class _ChatsPageState extends State<ChatsPage> {
                             ),
                           ),
                           if (unread > 0) ...[
-                            const SizedBox(width: 8),
+                            SizedBox(width: rs(8)),
                             Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 3,
+                              padding: EdgeInsets.symmetric(
+                                horizontal: rs(8),
+                                vertical: rs(3),
                               ),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF8E3FF3),
@@ -2964,19 +2975,19 @@ class _ChatsPageState extends State<ChatsPage> {
                               ),
                               child: Text(
                                 unread > 99 ? '99+' : '$unread',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w700,
-                                  fontSize: 11,
+                                  fontSize: rs(11).clamp(10, 13).toDouble(),
                                 ),
                               ),
                             ),
                           ] else if (pinned) ...[
-                            const SizedBox(width: 8),
-                            const Icon(
+                            SizedBox(width: rs(8)),
+                            Icon(
                               Icons.push_pin_rounded,
-                              color: Color(0xFF7C8396),
-                              size: 17,
+                              color: const Color(0xFF7C8396),
+                              size: rs(17),
                             ),
                           ],
                         ],
@@ -2993,16 +3004,17 @@ class _ChatsPageState extends State<ChatsPage> {
   }
 
   Widget _buildChatTools(BuildContext context) {
+    double rs(double value) => context.su(value);
     final canCreateGroup =
         _newChatController.text.trim().isNotEmpty &&
         _parseMemberIds().isNotEmpty;
     final canFindUid = _uidSearchController.text.trim().isNotEmpty;
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      padding: EdgeInsets.fromLTRB(rs(12), rs(10), rs(12), rs(10)),
       decoration: BoxDecoration(
         color: const Color(0xFF161A23),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(rs(16)),
         border: Border.all(color: const Color(0xFF252B38)),
       ),
       child: Column(
@@ -3019,7 +3031,7 @@ class _ChatsPageState extends State<ChatsPage> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: rs(8)),
               FilledButton(
                 onPressed: _uidLookupLoading || !canFindUid
                     ? null
@@ -3029,7 +3041,7 @@ class _ChatsPageState extends State<ChatsPage> {
             ],
           ),
           if (_uidResult != null) ...[
-            const SizedBox(height: 8),
+            SizedBox(height: rs(8)),
             Align(
               alignment: Alignment.centerLeft,
               child: OutlinedButton.icon(
@@ -3039,7 +3051,7 @@ class _ChatsPageState extends State<ChatsPage> {
               ),
             ),
           ],
-          const SizedBox(height: 10),
+          SizedBox(height: rs(10)),
           Row(
             children: [
               Expanded(
@@ -3052,7 +3064,7 @@ class _ChatsPageState extends State<ChatsPage> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: rs(8)),
               Expanded(
                 child: TextField(
                   controller: _newMembersController,
@@ -3063,7 +3075,7 @@ class _ChatsPageState extends State<ChatsPage> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: rs(8)),
               FilledButton(
                 onPressed: canCreateGroup ? _createChat : null,
                 child: const Text('Create'),
@@ -3077,10 +3089,12 @@ class _ChatsPageState extends State<ChatsPage> {
 
   Widget _buildThread(BuildContext context) {
     final theme = Theme.of(context);
+    double rs(double value) => context.su(value);
     final typingBanner = _typingBannerText();
     final onlineCount = _onlineUsers.length;
     final hasOlder = _messagesNextBeforeId != null;
     final hasUploadingDraft = _draftAttachments.any((item) => item.uploading);
+    final bubbleMaxWidth = MediaQuery.of(context).size.width * 0.78;
     final canSend =
         _activeChatId != null &&
         (_messageController.text.trim().isNotEmpty ||
@@ -3142,17 +3156,19 @@ class _ChatsPageState extends State<ChatsPage> {
           return Align(
             alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 430),
+              constraints: BoxConstraints(
+                maxWidth: bubbleMaxWidth.clamp(250, 460).toDouble(),
+              ),
               child: InkWell(
                 onLongPress: () => _openMessageActions(msg),
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(rs(14)),
                 child: Container(
                   margin: EdgeInsets.only(
-                    bottom: 8,
-                    left: isOwn ? 34 : 0,
-                    right: isOwn ? 0 : 34,
+                    bottom: rs(8),
+                    left: isOwn ? rs(34) : 0,
+                    right: isOwn ? 0 : rs(34),
                   ),
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                  padding: EdgeInsets.fromLTRB(rs(12), rs(10), rs(12), rs(8)),
                   decoration: BoxDecoration(
                     gradient: isOwn
                         ? const LinearGradient(
@@ -3162,7 +3178,7 @@ class _ChatsPageState extends State<ChatsPage> {
                           )
                         : null,
                     color: isOwn ? null : const Color(0xFF1A1E28),
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(rs(14)),
                     border: Border.all(
                       color: isOwn
                           ? const Color(0xFFA95CFF)
@@ -3192,15 +3208,17 @@ class _ChatsPageState extends State<ChatsPage> {
                                     false);
                             if (isImage && resolvedUrl.isNotEmpty) {
                               return Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
+                                padding: EdgeInsets.only(bottom: rs(8)),
                                 child: InkWell(
                                   onTap: () => _openAttachmentUrl(rawUrl),
-                                  borderRadius: BorderRadius.circular(12),
+                                  borderRadius: BorderRadius.circular(rs(12)),
                                   child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(12),
+                                    borderRadius: BorderRadius.circular(rs(12)),
                                     child: Image.network(
                                       resolvedUrl,
-                                      height: 180,
+                                      height: rs(
+                                        180,
+                                      ).clamp(130, 220).toDouble(),
                                       fit: BoxFit.cover,
                                       errorBuilder: (_, _, _) => Container(
                                         height: 70,
@@ -3219,21 +3237,21 @@ class _ChatsPageState extends State<ChatsPage> {
                             }
 
                             return Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
+                              padding: EdgeInsets.only(bottom: rs(8)),
                               child: InkWell(
                                 onTap: () => _openAttachmentUrl(rawUrl),
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(rs(12)),
                                 child: Container(
                                   width: double.infinity,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: rs(10),
+                                    vertical: rs(8),
                                   ),
                                   decoration: BoxDecoration(
                                     color: isOwn
                                         ? const Color(0xFF8637DC)
                                         : const Color(0xFF222836),
-                                    borderRadius: BorderRadius.circular(12),
+                                    borderRadius: BorderRadius.circular(rs(12)),
                                     border: Border.all(
                                       color: isOwn
                                           ? const Color(0xFFAB78E9)
@@ -3246,7 +3264,7 @@ class _ChatsPageState extends State<ChatsPage> {
                                         Icons.attach_file_rounded,
                                         size: 18,
                                       ),
-                                      const SizedBox(width: 8),
+                                      SizedBox(width: rs(8)),
                                       Expanded(
                                         child: Text(
                                           size == null
@@ -3275,8 +3293,8 @@ class _ChatsPageState extends State<ChatsPage> {
                         return [
                           const SizedBox(height: 6),
                           Wrap(
-                            spacing: 6,
-                            runSpacing: 6,
+                            spacing: rs(6),
+                            runSpacing: rs(6),
                             children: reactions.map((reaction) {
                               final emoji = reaction['emoji']?.toString() ?? '';
                               final count = _asInt(reaction['count']) ?? 0;
@@ -3286,9 +3304,9 @@ class _ChatsPageState extends State<ChatsPage> {
                                 onTap: () => _toggleMessageReaction(msg, emoji),
                                 borderRadius: BorderRadius.circular(999),
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 4,
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: rs(8),
+                                    vertical: rs(4),
                                   ),
                                   decoration: BoxDecoration(
                                     color: reactedByMe
@@ -3313,13 +3331,13 @@ class _ChatsPageState extends State<ChatsPage> {
                           ),
                         ];
                       }(),
-                      const SizedBox(height: 4),
+                      SizedBox(height: rs(4)),
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           if (!isOwn && senderId != null)
                             Padding(
-                              padding: const EdgeInsets.only(right: 8),
+                              padding: EdgeInsets.only(right: rs(8)),
                               child: Text(
                                 'User $senderId',
                                 style: theme.textTheme.labelSmall?.copyWith(
@@ -3337,10 +3355,10 @@ class _ChatsPageState extends State<ChatsPage> {
                               ),
                             ),
                           if (isOwn && status.isNotEmpty) ...[
-                            const SizedBox(width: 4),
+                            SizedBox(width: rs(4)),
                             Icon(
                               _messageStatusIcon(status),
-                              size: 15,
+                              size: rs(15),
                               color: status.toLowerCase() == 'read'
                                   ? const Color(0xFF99E7FF)
                                   : const Color(0xFFE1CBFF),
@@ -3363,11 +3381,11 @@ class _ChatsPageState extends State<ChatsPage> {
         if (_activeChatId != null)
           Container(
             width: double.infinity,
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            margin: EdgeInsets.only(bottom: rs(8)),
+            padding: EdgeInsets.symmetric(horizontal: rs(12), vertical: rs(8)),
             decoration: BoxDecoration(
               color: const Color(0xFF1A1F2A),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(rs(12)),
               border: Border.all(color: const Color(0xFF2C3342)),
             ),
             child: Text(
@@ -3383,7 +3401,7 @@ class _ChatsPageState extends State<ChatsPage> {
         Expanded(
           child: Container(
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(rs(14)),
               gradient: const LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
@@ -3402,22 +3420,22 @@ class _ChatsPageState extends State<ChatsPage> {
             ),
           ),
         ),
-        const SizedBox(height: 8),
+        SizedBox(height: rs(8)),
         Container(
           decoration: BoxDecoration(
             color: const Color(0xFF161B25),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(rs(16)),
             border: Border.all(color: const Color(0xFF2A3140)),
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          padding: EdgeInsets.symmetric(horizontal: rs(10), vertical: rs(6)),
           child: Column(
             children: [
               if (_draftAttachments.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: EdgeInsets.only(bottom: rs(8)),
                   child: Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
+                    spacing: rs(8),
+                    runSpacing: rs(8),
                     children: _draftAttachments.map((draft) {
                       final progressText = draft.uploading
                           ? '${(draft.progress * 100).round()}%'
@@ -3426,13 +3444,13 @@ class _ChatsPageState extends State<ChatsPage> {
                           : (draft.error ?? 'Pending');
                       return Container(
                         constraints: const BoxConstraints(maxWidth: 260),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 6,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: rs(8),
+                          vertical: rs(6),
                         ),
                         decoration: BoxDecoration(
                           color: const Color(0xFF232A37),
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(rs(10)),
                           border: Border.all(color: const Color(0xFF333B4D)),
                         ),
                         child: Row(
@@ -3442,9 +3460,9 @@ class _ChatsPageState extends State<ChatsPage> {
                               draft.isImage
                                   ? Icons.image_outlined
                                   : Icons.insert_drive_file_outlined,
-                              size: 16,
+                              size: rs(16),
                             ),
-                            const SizedBox(width: 6),
+                            SizedBox(width: rs(6)),
                             Flexible(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -3455,19 +3473,19 @@ class _ChatsPageState extends State<ChatsPage> {
                                     overflow: TextOverflow.ellipsis,
                                     style: theme.textTheme.bodySmall,
                                   ),
-                                  const SizedBox(height: 2),
+                                  SizedBox(height: rs(2)),
                                   Text(
                                     '$progressText - ${_formatFileSize(draft.sizeBytes)}',
                                     style: theme.textTheme.labelSmall,
                                   ),
                                   if (draft.uploading)
                                     Padding(
-                                      padding: const EdgeInsets.only(top: 4),
+                                      padding: EdgeInsets.only(top: rs(4)),
                                       child: LinearProgressIndicator(
                                         value: draft.progress
                                             .clamp(0, 1)
                                             .toDouble(),
-                                        minHeight: 4,
+                                        minHeight: rs(4),
                                       ),
                                     ),
                                 ],
@@ -3477,8 +3495,8 @@ class _ChatsPageState extends State<ChatsPage> {
                               onPressed: draft.uploading
                                   ? null
                                   : () => _removeDraftAttachment(draft.localId),
-                              icon: const Icon(Icons.close_rounded, size: 16),
-                              splashRadius: 16,
+                              icon: Icon(Icons.close_rounded, size: rs(16)),
+                              splashRadius: rs(16),
                             ),
                           ],
                         ),
@@ -3507,15 +3525,15 @@ class _ChatsPageState extends State<ChatsPage> {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  SizedBox(width: rs(6)),
                   FilledButton(
                     onPressed: canSend ? _sendMessage : null,
                     style: FilledButton.styleFrom(
                       shape: const CircleBorder(),
-                      padding: const EdgeInsets.all(14),
-                      minimumSize: const Size(46, 46),
+                      padding: EdgeInsets.all(rs(14)),
+                      minimumSize: Size(rs(46), rs(46)),
                     ),
-                    child: const Icon(Icons.send_rounded, size: 20),
+                    child: Icon(Icons.send_rounded, size: rs(20)),
                   ),
                 ],
               ),
@@ -3529,6 +3547,7 @@ class _ChatsPageState extends State<ChatsPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    double rs(double value) => context.su(value);
     final wide = MediaQuery.of(context).size.width >= 900;
     final activeChat = _activeChat;
     final activeTitle = activeChat?['title']?.toString() ?? 'Conversation';
@@ -3549,10 +3568,10 @@ class _ChatsPageState extends State<ChatsPage> {
     final listPane = Column(
       children: [
         Container(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+          padding: EdgeInsets.fromLTRB(rs(12), rs(12), rs(12), rs(10)),
           decoration: BoxDecoration(
             color: const Color(0xFF151A24),
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(rs(18)),
             border: Border.all(color: const Color(0xFF262D3A)),
           ),
           child: Column(
@@ -3560,10 +3579,10 @@ class _ChatsPageState extends State<ChatsPage> {
               Row(
                 children: [
                   Container(
-                    width: 38,
-                    height: 38,
+                    width: rs(38),
+                    height: rs(38),
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(rs(12)),
                       gradient: const LinearGradient(
                         colors: [Color(0xFF7A46FA), Color(0xFFB65CFF)],
                         begin: Alignment.topLeft,
@@ -3576,7 +3595,7 @@ class _ChatsPageState extends State<ChatsPage> {
                       size: 20,
                     ),
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: rs(10)),
                   const Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3622,7 +3641,7 @@ class _ChatsPageState extends State<ChatsPage> {
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
+              SizedBox(height: rs(10)),
               TextField(
                 controller: _chatSearchController,
                 onChanged: (value) => setState(() => _chatQuery = value),
@@ -3640,7 +3659,7 @@ class _ChatsPageState extends State<ChatsPage> {
                         ),
                 ),
               ),
-              const SizedBox(height: 10),
+              SizedBox(height: rs(10)),
               Row(
                 children: [
                   Expanded(
@@ -3651,14 +3670,14 @@ class _ChatsPageState extends State<ChatsPage> {
                       label: Text(_showChatTools ? 'Hide tools' : 'New chat'),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: rs(8)),
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: rs(10),
+                      vertical: rs(8),
                     ),
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(rs(12)),
                       color: const Color(0xFF1A2130),
                       border: Border.all(color: const Color(0xFF30394A)),
                     ),
@@ -3669,14 +3688,14 @@ class _ChatsPageState extends State<ChatsPage> {
                       color: _realtimeEnabled
                           ? theme.colorScheme.primary
                           : const Color(0xFF6F7688),
-                      size: 20,
+                      size: rs(20),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
+              SizedBox(height: rs(10)),
               SizedBox(
-                height: 36,
+                height: rs(36).clamp(32, 44).toDouble(),
                 child: ListView.separated(
                   scrollDirection: Axis.horizontal,
                   itemBuilder: (context, index) {
@@ -3703,11 +3722,11 @@ class _ChatsPageState extends State<ChatsPage> {
                       ),
                     );
                   },
-                  separatorBuilder: (_, _) => const SizedBox(width: 8),
+                  separatorBuilder: (_, _) => SizedBox(width: rs(8)),
                   itemCount: folderTabs.length,
                 ),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: rs(8)),
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
@@ -3721,18 +3740,18 @@ class _ChatsPageState extends State<ChatsPage> {
           ),
         ),
         if (_showChatTools) ...[
-          const SizedBox(height: 10),
+          SizedBox(height: rs(10)),
           _buildChatTools(context),
         ],
-        const SizedBox(height: 10),
+        SizedBox(height: rs(10)),
         Expanded(
           child: Container(
             decoration: BoxDecoration(
               color: const Color(0xFF11151D),
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(rs(18)),
               border: Border.all(color: const Color(0xFF242B38)),
             ),
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 2),
+            padding: EdgeInsets.fromLTRB(rs(8), rs(8), rs(8), rs(2)),
             child: _buildChatList(context),
           ),
         ),
@@ -3747,11 +3766,11 @@ class _ChatsPageState extends State<ChatsPage> {
     final threadPane = Column(
       children: [
         Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+          margin: EdgeInsets.only(bottom: rs(8)),
+          padding: EdgeInsets.fromLTRB(rs(8), rs(6), rs(8), rs(6)),
           decoration: BoxDecoration(
             color: const Color(0xFF151A24),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(rs(16)),
             border: Border.all(color: const Color(0xFF262D3A)),
           ),
           child: Row(
@@ -3759,17 +3778,17 @@ class _ChatsPageState extends State<ChatsPage> {
               if (!wide)
                 IconButton(
                   onPressed: () => setState(() => _mobileThreadOpen = false),
-                  icon: const Icon(Icons.arrow_back_rounded),
+                  icon: Icon(Icons.arrow_back_rounded, size: rs(24)),
                 ),
               CircleAvatar(
-                radius: 18,
+                radius: rs(18),
                 backgroundColor: const Color(0xFF3A2D57),
                 child: Text(
                   headerTitle.isNotEmpty ? headerTitle[0].toUpperCase() : '?',
                   style: const TextStyle(color: Colors.white),
                 ),
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: rs(10)),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3825,10 +3844,10 @@ class _ChatsPageState extends State<ChatsPage> {
           child: Container(
             decoration: BoxDecoration(
               color: const Color(0xFF0C0F15),
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(rs(18)),
               border: Border.all(color: const Color(0xFF242B38)),
             ),
-            padding: const EdgeInsets.all(10),
+            padding: EdgeInsets.all(rs(10)),
             child: _buildThread(context),
           ),
         ),
@@ -3836,12 +3855,12 @@ class _ChatsPageState extends State<ChatsPage> {
     );
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      padding: EdgeInsets.fromLTRB(rs(10), rs(8), rs(10), rs(8)),
       child: wide
           ? Row(
               children: [
                 Expanded(flex: 42, child: listPane),
-                const SizedBox(width: 10),
+                SizedBox(width: rs(10)),
                 Expanded(flex: 58, child: threadPane),
               ],
             )
@@ -4096,15 +4115,16 @@ class _ContactsPageState extends State<ContactsPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    double rs(double value) => context.su(value);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      padding: EdgeInsets.fromLTRB(rs(10), rs(8), rs(10), rs(8)),
       child: Column(
         children: [
           Container(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.all(rs(12)),
             decoration: BoxDecoration(
               color: const Color(0xFF151A24),
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(rs(18)),
               border: Border.all(color: const Color(0xFF262D3A)),
             ),
             child: Column(
@@ -4121,14 +4141,14 @@ class _ContactsPageState extends State<ContactsPage> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    SizedBox(width: rs(8)),
                     FilledButton(
                       onPressed: _loading ? null : _searchUsers,
                       child: const Text('Search'),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: rs(8)),
                 Row(
                   children: [
                     Expanded(
@@ -4141,7 +4161,7 @@ class _ContactsPageState extends State<ContactsPage> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    SizedBox(width: rs(8)),
                     OutlinedButton(
                       onPressed: _loading ? null : _findByUid,
                       child: const Text('Open'),
@@ -4152,12 +4172,12 @@ class _ContactsPageState extends State<ContactsPage> {
             ),
           ),
           if (_uidResult != null) ...[
-            const SizedBox(height: 10),
+            SizedBox(height: rs(10)),
             Container(
-              padding: const EdgeInsets.all(10),
+              padding: EdgeInsets.all(rs(10)),
               decoration: BoxDecoration(
                 color: const Color(0xFF171C26),
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(rs(14)),
                 border: Border.all(color: const Color(0xFF293040)),
               ),
               child: Row(
@@ -4169,7 +4189,7 @@ class _ContactsPageState extends State<ContactsPage> {
                       return value.isEmpty ? '?' : value[0].toUpperCase();
                     }()),
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: rs(10)),
                   Expanded(
                     child: Text(
                       '${_uidResult!['username']} (@${_uidResult!['uid'] ?? '-'})',
@@ -4186,12 +4206,12 @@ class _ContactsPageState extends State<ContactsPage> {
               ),
             ),
           ],
-          const SizedBox(height: 10),
+          SizedBox(height: rs(10)),
           Expanded(
             child: Container(
               decoration: BoxDecoration(
                 color: const Color(0xFF11151D),
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(rs(18)),
                 border: Border.all(color: const Color(0xFF242B38)),
               ),
               child: _loading && _results.isEmpty
@@ -4207,9 +4227,9 @@ class _ContactsPageState extends State<ContactsPage> {
                     )
                   : ListView.builder(
                       itemCount: _results.length,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 8,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: rs(8),
+                        vertical: rs(8),
                       ),
                       itemBuilder: (context, index) {
                         final user = _results[index];
@@ -4311,6 +4331,7 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    double rs(double value) => context.su(value);
     final profile = _profile;
     final username = profile?['username']?.toString() ?? 'User';
     final uid = profile?['uid']?.toString() ?? '';
@@ -4330,7 +4351,7 @@ class _ProfilePageState extends State<ProfilePage> {
           icon: Icon(icon, size: 18),
           label: Text(label),
           style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 12),
+            padding: EdgeInsets.symmetric(vertical: rs(12)),
           ),
         ),
       );
@@ -4338,12 +4359,12 @@ class _ProfilePageState extends State<ProfilePage> {
 
     Widget infoRow(String label, String value) {
       return Padding(
-        padding: const EdgeInsets.only(bottom: 12),
+        padding: EdgeInsets.only(bottom: rs(12)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(value, style: theme.textTheme.titleLarge),
-            const SizedBox(height: 2),
+            SizedBox(height: rs(2)),
             Text(label, style: const TextStyle(color: Color(0xFF8A92A7))),
           ],
         ),
@@ -4351,49 +4372,49 @@ class _ProfilePageState extends State<ProfilePage> {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      padding: EdgeInsets.fromLTRB(rs(10), rs(8), rs(10), rs(8)),
       child: _loading && profile == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               children: [
                 Container(
-                  padding: const EdgeInsets.fromLTRB(16, 20, 16, 16),
+                  padding: EdgeInsets.fromLTRB(rs(16), rs(20), rs(16), rs(16)),
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                       colors: [Color(0xFF42556A), Color(0xFF303A47)],
                     ),
-                    borderRadius: BorderRadius.circular(22),
+                    borderRadius: BorderRadius.circular(rs(22)),
                     border: Border.all(color: const Color(0xFF4A566A)),
                   ),
                   child: Column(
                     children: [
                       CircleAvatar(
-                        radius: 46,
+                        radius: rs(46).clamp(38, 54).toDouble(),
                         backgroundColor: const Color(0xFF9553E8),
                         child: Text(
                           username.isNotEmpty ? username[0].toUpperCase() : '?',
-                          style: const TextStyle(
-                            fontSize: 30,
+                          style: TextStyle(
+                            fontSize: rs(30).clamp(24, 34).toDouble(),
                             fontWeight: FontWeight.w700,
                           ),
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      SizedBox(height: rs(12)),
                       Text(
                         username,
-                        style: const TextStyle(
-                          fontSize: 36,
+                        style: TextStyle(
+                          fontSize: rs(36).clamp(28, 40).toDouble(),
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(height: 2),
+                      SizedBox(height: rs(2)),
                       Text(
                         uid.isEmpty ? '@user$id' : '@$uid',
                         style: const TextStyle(color: Color(0xFFD3DAE8)),
                       ),
-                      const SizedBox(height: 2),
+                      SizedBox(height: rs(2)),
                       Text(
                         status,
                         style: const TextStyle(color: Color(0xFFB9E8C1)),
@@ -4401,7 +4422,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 Row(
                   children: [
                     actionButton(
@@ -4410,13 +4431,13 @@ class _ProfilePageState extends State<ProfilePage> {
                       onPressed: () =>
                           _show('Avatar upload will be added next'),
                     ),
-                    const SizedBox(width: 8),
+                    SizedBox(width: rs(8)),
                     actionButton(
                       icon: Icons.edit_outlined,
                       label: 'Edit',
                       onPressed: () => _show('Edit mode enabled below'),
                     ),
-                    const SizedBox(width: 8),
+                    SizedBox(width: rs(8)),
                     actionButton(
                       icon: Icons.settings_outlined,
                       label: 'Settings',
@@ -4425,12 +4446,12 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 Container(
-                  padding: const EdgeInsets.all(14),
+                  padding: EdgeInsets.all(rs(14)),
                   decoration: BoxDecoration(
                     color: const Color(0xFF151A24),
-                    borderRadius: BorderRadius.circular(18),
+                    borderRadius: BorderRadius.circular(rs(18)),
                     border: Border.all(color: const Color(0xFF262D3A)),
                   ),
                   child: Column(
@@ -4443,12 +4464,12 @@ class _ProfilePageState extends State<ProfilePage> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 Container(
-                  padding: const EdgeInsets.all(12),
+                  padding: EdgeInsets.all(rs(12)),
                   decoration: BoxDecoration(
                     color: const Color(0xFF151A24),
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(rs(16)),
                     border: Border.all(color: const Color(0xFF262D3A)),
                   ),
                   child: Column(
@@ -4460,7 +4481,7 @@ class _ProfilePageState extends State<ProfilePage> {
                           prefixIcon: Icon(Icons.alternate_email_rounded),
                         ),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: rs(10)),
                       TextField(
                         controller: _bioController,
                         minLines: 3,
@@ -4470,7 +4491,7 @@ class _ProfilePageState extends State<ProfilePage> {
                           prefixIcon: Icon(Icons.info_outline_rounded),
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      SizedBox(height: rs(12)),
                       Row(
                         children: [
                           FilledButton.icon(
@@ -4478,7 +4499,7 @@ class _ProfilePageState extends State<ProfilePage> {
                             icon: const Icon(Icons.save_outlined),
                             label: const Text('Save'),
                           ),
-                          const SizedBox(width: 8),
+                          SizedBox(width: rs(8)),
                           OutlinedButton.icon(
                             onPressed: _loading ? null : _load,
                             icon: const Icon(Icons.refresh_rounded),
@@ -4591,14 +4612,15 @@ class _CustomizationPageState extends State<CustomizationPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    double rs(double value) => context.su(value);
     final accentPreview = _parseAccentColor(_accentController.text);
 
     Widget sectionCard(Widget child) {
       return Container(
-        padding: const EdgeInsets.all(14),
+        padding: EdgeInsets.all(rs(14)),
         decoration: BoxDecoration(
           color: const Color(0xFF151A24),
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(rs(18)),
           border: Border.all(color: const Color(0xFF262D3A)),
         ),
         child: child,
@@ -4615,29 +4637,30 @@ class _CustomizationPageState extends State<CustomizationPage> {
         dense: true,
         contentPadding: EdgeInsets.zero,
         leading: Container(
-          width: 36,
-          height: 36,
+          width: rs(36),
+          height: rs(36),
           decoration: BoxDecoration(
             color: color,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(rs(10)),
           ),
-          child: Icon(icon, color: Colors.white, size: 19),
+          child: Icon(icon, color: Colors.white, size: rs(19)),
         ),
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Text(
           subtitle,
           style: const TextStyle(color: Color(0xFF9098AC)),
         ),
-        trailing: const Icon(
+        trailing: Icon(
           Icons.chevron_right_rounded,
-          color: Color(0xFF7F879A),
+          color: const Color(0xFF7F879A),
+          size: rs(22),
         ),
         onTap: () => _show('$title screen is coming soon'),
       );
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      padding: EdgeInsets.fromLTRB(rs(10), rs(8), rs(10), rs(8)),
       child: _loading && _settings == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
@@ -4645,12 +4668,15 @@ class _CustomizationPageState extends State<CustomizationPage> {
                 sectionCard(
                   Row(
                     children: [
-                      const CircleAvatar(
-                        radius: 30,
-                        backgroundColor: Color(0xFF9553E8),
-                        child: Icon(Icons.settings_rounded, size: 28),
+                      CircleAvatar(
+                        radius: rs(30).clamp(26, 36).toDouble(),
+                        backgroundColor: const Color(0xFF9553E8),
+                        child: Icon(
+                          Icons.settings_rounded,
+                          size: rs(28).clamp(24, 32).toDouble(),
+                        ),
                       ),
-                      const SizedBox(width: 12),
+                      SizedBox(width: rs(12)),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4671,7 +4697,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 sectionCard(
                   Column(
                     children: [
@@ -4726,7 +4752,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 sectionCard(
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -4737,7 +4763,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: rs(10)),
                       TextField(
                         controller: _uidController,
                         decoration: const InputDecoration(
@@ -4745,7 +4771,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                           prefixIcon: Icon(Icons.alternate_email_rounded),
                         ),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: rs(10)),
                       TextField(
                         controller: _themeController,
                         onChanged: (_) => setState(() {}),
@@ -4754,7 +4780,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                           prefixIcon: Icon(Icons.brush_outlined),
                         ),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: rs(10)),
                       TextField(
                         controller: _accentController,
                         onChanged: (_) => setState(() {}),
@@ -4766,7 +4792,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                               : Container(
                                   width: 18,
                                   height: 18,
-                                  margin: const EdgeInsets.all(12),
+                                  margin: EdgeInsets.all(rs(12)),
                                   decoration: BoxDecoration(
                                     color: accentPreview,
                                     borderRadius: BorderRadius.circular(4),
@@ -4774,7 +4800,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                                 ),
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      SizedBox(height: rs(12)),
                       Row(
                         children: [
                           FilledButton.icon(
@@ -4782,7 +4808,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                             icon: const Icon(Icons.save_outlined),
                             label: const Text('Save'),
                           ),
-                          const SizedBox(width: 8),
+                          SizedBox(width: rs(8)),
                           OutlinedButton.icon(
                             onPressed: _loading ? null : _load,
                             icon: const Icon(Icons.refresh_rounded),
@@ -4793,7 +4819,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 sectionCard(
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -4804,7 +4830,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(height: 10),
+                      SizedBox(height: rs(10)),
                       DropdownButtonFormField<String>(
                         initialValue: _updateChannel,
                         decoration: const InputDecoration(
@@ -4822,7 +4848,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                           setState(() => _updateChannel = value);
                         },
                       ),
-                      const SizedBox(height: 6),
+                      SizedBox(height: rs(6)),
                       SwitchListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
@@ -4842,7 +4868,7 @@ class _CustomizationPageState extends State<CustomizationPage> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: rs(10)),
                 sectionCard(
                   Theme(
                     data: theme.copyWith(dividerColor: Colors.transparent),
@@ -4857,10 +4883,10 @@ class _CustomizationPageState extends State<CustomizationPage> {
                       children: [
                         Container(
                           width: double.infinity,
-                          padding: const EdgeInsets.all(10),
+                          padding: EdgeInsets.all(rs(10)),
                           decoration: BoxDecoration(
                             color: const Color(0xFF11151D),
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(rs(12)),
                             border: Border.all(color: const Color(0xFF283040)),
                           ),
                           child: SelectableText(
