@@ -4,12 +4,15 @@ from datetime import UTC, datetime
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.chat import (
     Chat,
     ChatMember,
     ChatType,
+    MediaFile,
     MemberRole,
     Message,
+    MessageAttachment,
     MessageDelivery,
     MessageDeliveryStatus,
     MessageLink,
@@ -17,7 +20,7 @@ from app.models.chat import (
     PinnedMessage,
 )
 from app.models.user import User
-from app.schemas.chat import ChatCreate, MessageOut, MessageReactionSummary
+from app.schemas.chat import ChatCreate, MessageAttachmentOut, MessageOut, MessageReactionSummary
 
 
 def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
@@ -121,6 +124,16 @@ def _require_admin_or_owner(db: Session, chat_id: int, user_id: int) -> ChatMemb
     return membership
 
 
+def _media_url(storage_name: str) -> str:
+    settings = get_settings()
+    base = settings.media_url_path.rstrip("/")
+    if not base:
+        base = "/media"
+    if not base.startswith("/"):
+        base = f"/{base}"
+    return f"{base}/{storage_name}"
+
+
 def add_member(db: Session, chat_id: int, requester_id: int, user_id: int, role: MemberRole) -> ChatMember:
     _require_admin_or_owner(db, chat_id=chat_id, user_id=requester_id)
 
@@ -146,8 +159,13 @@ def create_message(
     content: str,
     reply_to_message_id: int | None = None,
     forward_from_message_id: int | None = None,
+    attachment_ids: list[int] | None = None,
 ) -> Message:
     _require_member(db, chat_id=chat_id, user_id=sender_id)
+    clean_content = content.strip()
+    ordered_attachment_ids = list(dict.fromkeys(attachment_ids or []))
+    if not clean_content and not ordered_attachment_ids:
+        raise ValueError("Message must contain text or attachment")
 
     if reply_to_message_id is not None:
         reply_message = db.scalar(select(Message).where(Message.id == reply_to_message_id))
@@ -160,9 +178,36 @@ def create_message(
             raise ValueError("Forward source message not found")
         _require_member(db, chat_id=source_message.chat_id, user_id=sender_id)
 
-    message = Message(chat_id=chat_id, sender_id=sender_id, content=content)
+    message = Message(chat_id=chat_id, sender_id=sender_id, content=clean_content)
     db.add(message)
     db.flush()
+
+    if ordered_attachment_ids:
+        media_rows = list(
+            db.scalars(select(MediaFile).where(MediaFile.id.in_(ordered_attachment_ids))).all()
+        )
+        media_by_id = {row.id: row for row in media_rows}
+        missing_ids = [media_id for media_id in ordered_attachment_ids if media_id not in media_by_id]
+        if missing_ids:
+            raise ValueError("Attachment not found")
+
+        for idx, media_id in enumerate(ordered_attachment_ids):
+            media = media_by_id[media_id]
+            if media.uploader_id != sender_id:
+                raise ValueError("Attachment belongs to another user")
+            if media.chat_id != chat_id:
+                raise ValueError("Attachment was uploaded for another chat")
+            if media.is_committed:
+                raise ValueError("Attachment is already used")
+
+            media.is_committed = True
+            db.add(
+                MessageAttachment(
+                    message_id=message.id,
+                    media_file_id=media.id,
+                    sort_order=idx,
+                )
+            )
 
     if reply_to_message_id is not None or forward_from_message_id is not None:
         db.add(
@@ -280,6 +325,35 @@ def serialize_messages(db: Session, messages: list[Message], user_id: int) -> li
     for reaction in all_reactions:
         reactions_by_message[reaction.message_id][reaction.emoji].add(reaction.user_id)
 
+    attachment_links = list(
+        db.scalars(
+            select(MessageAttachment)
+            .where(MessageAttachment.message_id.in_(message_ids))
+            .order_by(MessageAttachment.message_id.asc(), MessageAttachment.sort_order.asc(), MessageAttachment.id.asc())
+        ).all()
+    )
+    media_ids = [row.media_file_id for row in attachment_links]
+    media_map = {
+        media.id: media
+        for media in db.scalars(select(MediaFile).where(MediaFile.id.in_(media_ids))).all()
+    }
+    attachments_by_message: dict[int, list[MessageAttachmentOut]] = defaultdict(list)
+    for row in attachment_links:
+        media = media_map.get(row.media_file_id)
+        if media is None:
+            continue
+        mime = media.mime_type or "application/octet-stream"
+        attachments_by_message[row.message_id].append(
+            MessageAttachmentOut(
+                id=media.id,
+                file_name=media.original_name,
+                mime_type=mime,
+                size_bytes=media.size_bytes,
+                url=_media_url(media.storage_name),
+                is_image=mime.startswith("image/"),
+            )
+        )
+
     result: list[MessageOut] = []
     for message in messages:
         link = links_map.get(message.id)
@@ -312,6 +386,7 @@ def serialize_messages(db: Session, messages: list[Message], user_id: int) -> li
                     )
                     for emoji, user_ids in sorted(reactions_by_message[message.id].items())
                 ],
+                attachments=attachments_by_message.get(message.id, []),
             )
         )
     return result

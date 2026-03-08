@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.chat import ChatType, MemberRole, MessageDeliveryStatus
 
@@ -34,9 +34,27 @@ class ChatMemberAdd(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=10000)
+    content: str = Field(default="", max_length=10000)
     reply_to_message_id: int | None = None
     forward_from_message_id: int | None = None
+    attachment_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        has_content = bool(self.content.strip())
+        has_attachments = bool(self.attachment_ids)
+        if not has_content and not has_attachments:
+            raise ValueError("Message must contain text or attachment")
+        return self
+
+
+class MessageAttachmentOut(BaseModel):
+    id: int
+    file_name: str
+    mime_type: str
+    size_bytes: int
+    url: str
+    is_image: bool = False
 
 
 class MessageReactionSummary(BaseModel):
@@ -57,6 +75,7 @@ class MessageOut(BaseModel):
     forwarded_from_message_id: int | None = None
     is_pinned: bool = False
     reactions: list[MessageReactionSummary] = Field(default_factory=list)
+    attachments: list[MessageAttachmentOut] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -72,3 +91,12 @@ class MessageCursorOut(BaseModel):
 
 class MessageUpdate(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
+
+
+class MediaUploadOut(BaseModel):
+    id: int
+    file_name: str
+    mime_type: str
+    size_bytes: int
+    url: str
+    is_image: bool = False

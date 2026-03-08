@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -304,6 +305,37 @@ class ApiException implements Exception {
   ApiException(this.message);
   @override
   String toString() => message;
+}
+
+class DraftAttachment {
+  final String localId;
+  final int chatId;
+  final String fileName;
+  final String mimeType;
+  final int sizeBytes;
+  Uint8List? bytes;
+  double progress;
+  bool uploading;
+  int? mediaId;
+  String? mediaUrl;
+  String? error;
+
+  DraftAttachment({
+    required this.localId,
+    required this.chatId,
+    required this.fileName,
+    required this.mimeType,
+    required this.sizeBytes,
+    required this.bytes,
+    this.progress = 0,
+    this.uploading = false,
+    this.mediaId,
+    this.mediaUrl,
+    this.error,
+  });
+
+  bool get isUploaded => mediaId != null;
+  bool get isImage => mimeType.startsWith('image/');
 }
 
 class ApiClient {
@@ -639,11 +671,110 @@ class ApiClient {
     return Map<String, dynamic>.from(result as Map);
   }
 
-  Future<Map<String, dynamic>> sendMessage(int chatId, String content) async {
+  Iterable<List<int>> _chunkBytes(
+    Uint8List bytes, {
+    int chunkSize = 64 * 1024,
+  }) sync* {
+    if (bytes.isEmpty) return;
+    var offset = 0;
+    while (offset < bytes.length) {
+      final end = (offset + chunkSize < bytes.length)
+          ? offset + chunkSize
+          : bytes.length;
+      yield bytes.sublist(offset, end);
+      offset = end;
+    }
+  }
+
+  Future<Map<String, dynamic>> uploadAttachment(
+    int chatId, {
+    required String fileName,
+    required Uint8List bytes,
+    void Function(double progress)? onProgress,
+  }) async {
+    Future<http.Response> sendOnce() async {
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_safeBase/api/media/upload?chat_id=$chatId'),
+      );
+      if (accessToken != null && accessToken!.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $accessToken';
+      }
+
+      final total = bytes.length;
+      var sent = 0;
+      final stream = Stream<List<int>>.fromIterable(_chunkBytes(bytes)).map((
+        chunk,
+      ) {
+        sent += chunk.length;
+        if (total > 0 && onProgress != null) {
+          onProgress((sent / total).clamp(0, 1).toDouble());
+        }
+        return chunk;
+      });
+
+      request.files.add(
+        http.MultipartFile('file', stream, bytes.length, filename: fileName),
+      );
+
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 45),
+      );
+      return http.Response.fromStream(streamed);
+    }
+
+    http.Response response;
+    try {
+      response = await sendOnce();
+    } on TimeoutException {
+      throw ApiException('Upload timeout. Check internet or server status.');
+    } catch (_) {
+      throw ApiException('Upload failed. Check internet connection.');
+    }
+
+    if (response.statusCode == 401) {
+      final refreshed = await _tryRefreshAccessToken();
+      if (refreshed) {
+        try {
+          response = await sendOnce();
+        } on TimeoutException {
+          throw ApiException(
+            'Upload timeout. Check internet or server status.',
+          );
+        } catch (_) {
+          throw ApiException('Upload failed. Check internet connection.');
+        }
+      } else if (onUnauthorized != null) {
+        await onUnauthorized!();
+      }
+    }
+
+    final decoded = _decodeResponse(response);
+    if (response.statusCode >= 400) {
+      if (decoded is Map<String, dynamic> && decoded['detail'] != null) {
+        throw ApiException(_extractErrorMessage(decoded['detail']));
+      }
+      throw ApiException('HTTP ${response.statusCode}: ${response.body}');
+    }
+
+    if (decoded is! Map) {
+      throw ApiException('Invalid upload response');
+    }
+    if (onProgress != null) {
+      onProgress(1);
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  Future<Map<String, dynamic>> sendMessage(
+    int chatId,
+    String content, {
+    List<int> attachmentIds = const [],
+  }) async {
     final result = await _request(
       'POST',
       '/api/chats/$chatId/messages',
-      body: {'content': content},
+      body: {'content': content, 'attachment_ids': attachmentIds},
     );
     return Map<String, dynamic>.from(result as Map);
   }
@@ -1453,6 +1584,8 @@ class _ChatsPageState extends State<ChatsPage> {
   final _newChatController = TextEditingController();
   final _newMembersController = TextEditingController();
   final _messageController = TextEditingController();
+  final List<DraftAttachment> _draftAttachments = [];
+  int _attachmentCounter = 0;
   WebSocketChannel? _globalChannel;
 
   List<Map<String, dynamic>> _chats = [];
@@ -1627,6 +1760,219 @@ class _ChatsPageState extends State<ChatsPage> {
         .whereType<Map>()
         .map((entry) => Map<String, dynamic>.from(entry))
         .toList();
+  }
+
+  List<Map<String, dynamic>> _messageAttachmentRows(
+    Map<String, dynamic> message,
+  ) {
+    final raw = message['attachments'];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList();
+  }
+
+  String _nextAttachmentId() {
+    final next = _attachmentCounter++;
+    return '${DateTime.now().microsecondsSinceEpoch}-$next';
+  }
+
+  String _guessMimeType(String filename) {
+    final lower = filename.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.mp4')) return 'video/mp4';
+    if (lower.endsWith('.mov')) return 'video/quicktime';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.txt')) return 'text/plain';
+    return 'application/octet-stream';
+  }
+
+  String _formatFileSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
+    final mb = kb / 1024;
+    if (mb < 1024) return '${mb.toStringAsFixed(1)} MB';
+    final gb = mb / 1024;
+    return '${gb.toStringAsFixed(1)} GB';
+  }
+
+  String _resolveMediaUrl(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) return '';
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      return value;
+    }
+    final base = widget.api.baseUrl.endsWith('/')
+        ? widget.api.baseUrl.substring(0, widget.api.baseUrl.length - 1)
+        : widget.api.baseUrl;
+    if (value.startsWith('/')) {
+      return '$base$value';
+    }
+    return '$base/$value';
+  }
+
+  Future<void> _openAttachmentUrl(String rawUrl) async {
+    final resolved = _resolveMediaUrl(rawUrl);
+    if (resolved.isEmpty) return;
+    final uri = Uri.tryParse(resolved);
+    if (uri == null) {
+      _show(ApiException('Invalid attachment URL'));
+      return;
+    }
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened) {
+      _show(ApiException('Cannot open attachment'));
+    }
+  }
+
+  DraftAttachment? _findDraftAttachment(String localId) {
+    for (final item in _draftAttachments) {
+      if (item.localId == localId) return item;
+    }
+    return null;
+  }
+
+  void _updateDraftAttachment(
+    String localId,
+    void Function(DraftAttachment attachment) updater,
+  ) {
+    if (!mounted) return;
+    setState(() {
+      final index = _draftAttachments.indexWhere(
+        (attachment) => attachment.localId == localId,
+      );
+      if (index < 0) return;
+      updater(_draftAttachments[index]);
+    });
+  }
+
+  Future<void> _uploadDraftAttachment(DraftAttachment draft, int chatId) async {
+    final bytes = draft.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      _updateDraftAttachment(draft.localId, (attachment) {
+        attachment.uploading = false;
+        attachment.error = 'Attachment bytes are unavailable';
+      });
+      return;
+    }
+
+    _updateDraftAttachment(draft.localId, (attachment) {
+      attachment.uploading = true;
+      attachment.error = null;
+      attachment.progress = attachment.progress.clamp(0, 1).toDouble();
+    });
+
+    try {
+      final uploaded = await widget.api.uploadAttachment(
+        chatId,
+        fileName: draft.fileName,
+        bytes: bytes,
+        onProgress: (progress) {
+          _updateDraftAttachment(draft.localId, (attachment) {
+            attachment.progress = progress;
+          });
+        },
+      );
+      final mediaId = _asInt(uploaded['id']);
+      final mediaUrl = uploaded['url']?.toString();
+      _updateDraftAttachment(draft.localId, (attachment) {
+        attachment.uploading = false;
+        attachment.progress = 1;
+        attachment.mediaId = mediaId;
+        attachment.mediaUrl = mediaUrl;
+        attachment.error = null;
+        attachment.bytes = null;
+      });
+    } catch (error) {
+      final message = error is ApiException ? error.message : error.toString();
+      _updateDraftAttachment(draft.localId, (attachment) {
+        attachment.uploading = false;
+        attachment.error = message;
+      });
+    }
+  }
+
+  Future<void> _pickAttachments() async {
+    final chatId = _activeChatId;
+    if (chatId == null) return;
+
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: true,
+      );
+      if (picked == null || picked.files.isEmpty) return;
+
+      final added = <DraftAttachment>[];
+      for (final file in picked.files) {
+        final bytes = file.bytes;
+        if (bytes == null || bytes.isEmpty) {
+          continue;
+        }
+        added.add(
+          DraftAttachment(
+            localId: _nextAttachmentId(),
+            chatId: chatId,
+            fileName: file.name,
+            mimeType: _guessMimeType(file.name),
+            sizeBytes: file.size,
+            bytes: bytes,
+            uploading: true,
+            progress: 0,
+          ),
+        );
+      }
+      if (added.isEmpty) {
+        _show(ApiException('Selected files are empty or unsupported'));
+        return;
+      }
+
+      setState(() => _draftAttachments.addAll(added));
+      for (final draft in added) {
+        unawaited(_uploadDraftAttachment(draft, chatId));
+      }
+    } catch (error) {
+      _show(error);
+    }
+  }
+
+  Future<List<int>?> _ensureDraftUploads(int chatId) async {
+    final drafts = List<DraftAttachment>.from(_draftAttachments);
+    for (final draft in drafts) {
+      if (draft.chatId != chatId) {
+        _show(ApiException('Attachments belong to another chat'));
+        return null;
+      }
+      if (draft.mediaId != null) continue;
+      if (draft.uploading) {
+        _show(ApiException('Wait until attachments finish uploading'));
+        return null;
+      }
+      await _uploadDraftAttachment(draft, chatId);
+      final updated = _findDraftAttachment(draft.localId);
+      if (updated == null || updated.mediaId == null) {
+        _show(ApiException(updated?.error ?? 'Attachment upload failed'));
+        return null;
+      }
+    }
+
+    final mediaIds = _draftAttachments
+        .where((draft) => draft.chatId == chatId && draft.mediaId != null)
+        .map((draft) => draft.mediaId!)
+        .toList();
+    return mediaIds;
+  }
+
+  void _removeDraftAttachment(String localId) {
+    if (!mounted) return;
+    setState(() {
+      _draftAttachments.removeWhere((item) => item.localId == localId);
+    });
   }
 
   void _applyLocalReaction(
@@ -1814,6 +2160,9 @@ class _ChatsPageState extends State<ChatsPage> {
   }
 
   void _onComposerChanged(String value) {
+    if (mounted) {
+      setState(() {});
+    }
     final chatId = _activeChatId;
     if (chatId == null) return;
     final hasText = value.trim().isNotEmpty;
@@ -2056,6 +2405,7 @@ class _ChatsPageState extends State<ChatsPage> {
         if (switchingChat) {
           _typingUsers.clear();
           _onlineUsers.clear();
+          _draftAttachments.clear();
         }
       });
       _ackReadForVisibleMessages(chatId, items);
@@ -2156,11 +2506,20 @@ class _ChatsPageState extends State<ChatsPage> {
   Future<void> _sendMessage() async {
     final chatId = _activeChatId;
     final content = _messageController.text.trim();
-    if (chatId == null || content.isEmpty) return;
+    if (chatId == null) return;
 
     try {
-      final sent = await widget.api.sendMessage(chatId, content);
+      final attachmentIds = await _ensureDraftUploads(chatId);
+      if (attachmentIds == null) return;
+      if (content.isEmpty && attachmentIds.isEmpty) return;
+
+      final sent = await widget.api.sendMessage(
+        chatId,
+        content,
+        attachmentIds: attachmentIds,
+      );
       _messageController.clear();
+      setState(() => _draftAttachments.clear());
       _typingStopTimer?.cancel();
       _sendRealtimeTyping(chatId, false);
       _upsertMessage(sent);
@@ -2612,6 +2971,12 @@ class _ChatsPageState extends State<ChatsPage> {
     final typingBanner = _typingBannerText();
     final onlineCount = _onlineUsers.length;
     final hasOlder = _messagesNextBeforeId != null;
+    final hasUploadingDraft = _draftAttachments.any((item) => item.uploading);
+    final canSend =
+        _activeChatId != null &&
+        (_messageController.text.trim().isNotEmpty ||
+            _draftAttachments.isNotEmpty) &&
+        !hasUploadingDraft;
     return Column(
       children: [
         if (_activeChatId != null)
@@ -2726,7 +3091,124 @@ class _ChatsPageState extends State<ChatsPage> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(content),
+                                ...() {
+                                  final attachments = _messageAttachmentRows(
+                                    msg,
+                                  );
+                                  if (attachments.isEmpty) {
+                                    return const <Widget>[];
+                                  }
+                                  return [
+                                    ...attachments.map((attachment) {
+                                      final rawUrl =
+                                          attachment['url']?.toString() ?? '';
+                                      final resolvedUrl = _resolveMediaUrl(
+                                        rawUrl,
+                                      );
+                                      final fileName =
+                                          attachment['file_name']?.toString() ??
+                                          'file';
+                                      final size = _asInt(
+                                        attachment['size_bytes'],
+                                      );
+                                      final isImage =
+                                          attachment['is_image'] == true ||
+                                          (attachment['mime_type']
+                                                  ?.toString()
+                                                  .startsWith('image/') ??
+                                              false);
+                                      if (isImage && resolvedUrl.isNotEmpty) {
+                                        return Padding(
+                                          padding: const EdgeInsets.only(
+                                            bottom: 8,
+                                          ),
+                                          child: InkWell(
+                                            onTap: () =>
+                                                _openAttachmentUrl(rawUrl),
+                                            borderRadius: BorderRadius.circular(
+                                              12,
+                                            ),
+                                            child: ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                              child: Image.network(
+                                                resolvedUrl,
+                                                height: 180,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (_, _, _) =>
+                                                    Container(
+                                                      height: 70,
+                                                      alignment:
+                                                          Alignment.center,
+                                                      color: const Color(
+                                                        0xFFEAF2F6,
+                                                      ),
+                                                      child: Text(
+                                                        fileName,
+                                                        style: theme
+                                                            .textTheme
+                                                            .bodySmall,
+                                                      ),
+                                                    ),
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      }
+
+                                      return Padding(
+                                        padding: const EdgeInsets.only(
+                                          bottom: 8,
+                                        ),
+                                        child: InkWell(
+                                          onTap: () =>
+                                              _openAttachmentUrl(rawUrl),
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                          child: Container(
+                                            width: double.infinity,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 8,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFEAF2F6),
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                              border: Border.all(
+                                                color: const Color(0xFFD2E2EA),
+                                              ),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                const Icon(
+                                                  Icons.attach_file_rounded,
+                                                  size: 18,
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Expanded(
+                                                  child: Text(
+                                                    size == null
+                                                        ? fileName
+                                                        : '$fileName (${_formatFileSize(size)})',
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: theme
+                                                        .textTheme
+                                                        .bodySmall,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    }),
+                                  ];
+                                }(),
+                                if (content.isNotEmpty) Text(content),
                                 ...() {
                                   final reactions = _messageReactionRows(msg);
                                   if (reactions.isEmpty) {
@@ -2802,31 +3284,114 @@ class _ChatsPageState extends State<ChatsPage> {
             border: Border.all(color: const Color(0xFFDDE8ED)),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          child: Row(
+          child: Column(
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _messageController,
-                  enabled: _activeChatId != null,
-                  onChanged: _onComposerChanged,
-                  onSubmitted: (_) => _sendMessage(),
-                  minLines: 1,
-                  maxLines: 4,
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    hintText: 'Write a message',
+              if (_draftAttachments.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: _draftAttachments.map((draft) {
+                      final progressText = draft.uploading
+                          ? '${(draft.progress * 100).round()}%'
+                          : draft.isUploaded
+                          ? 'Uploaded'
+                          : (draft.error ?? 'Pending');
+                      return Container(
+                        constraints: const BoxConstraints(maxWidth: 260),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEAF2F6),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFD3E2EA)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              draft.isImage
+                                  ? Icons.image_outlined
+                                  : Icons.insert_drive_file_outlined,
+                              size: 16,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    draft.fileName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    '$progressText • ${_formatFileSize(draft.sizeBytes)}',
+                                    style: theme.textTheme.labelSmall,
+                                  ),
+                                  if (draft.uploading)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: LinearProgressIndicator(
+                                        value: draft.progress
+                                            .clamp(0, 1)
+                                            .toDouble(),
+                                        minHeight: 4,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: draft.uploading
+                                  ? null
+                                  : () => _removeDraftAttachment(draft.localId),
+                              icon: const Icon(Icons.close_rounded, size: 16),
+                              splashRadius: 16,
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: _activeChatId == null ? null : _sendMessage,
-                style: FilledButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: const EdgeInsets.all(14),
-                  minimumSize: const Size(46, 46),
-                ),
-                child: const Icon(Icons.send_rounded, size: 20),
+              Row(
+                children: [
+                  IconButton(
+                    onPressed: _activeChatId == null ? null : _pickAttachments,
+                    icon: const Icon(Icons.attach_file_rounded),
+                    tooltip: 'Attach file',
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: _messageController,
+                      enabled: _activeChatId != null,
+                      onChanged: _onComposerChanged,
+                      onSubmitted: (_) => _sendMessage(),
+                      minLines: 1,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        hintText: 'Write a message',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  FilledButton(
+                    onPressed: canSend ? _sendMessage : null,
+                    style: FilledButton.styleFrom(
+                      shape: const CircleBorder(),
+                      padding: const EdgeInsets.all(14),
+                      minimumSize: const Size(46, 46),
+                    ),
+                    child: const Icon(Icons.send_rounded, size: 20),
+                  ),
+                ],
               ),
             ],
           ),

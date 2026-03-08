@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routers import auth, chats, customization, realtime, releases, social, users
+from app.api.routers import auth, chats, customization, media, realtime, releases, social, users
 from app.core.config import get_settings
 from app.core.database import create_tables
 
@@ -51,10 +51,16 @@ def health() -> dict[str, str]:
 app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
+app.include_router(media.router, prefix="/api")
 app.include_router(social.router, prefix="/api")
 app.include_router(customization.router, prefix="/api")
 app.include_router(releases.router, prefix="/api")
 app.include_router(realtime.router, prefix="/api/realtime")
+
+media_dir = Path(settings.media_root).resolve()
+media_dir.mkdir(parents=True, exist_ok=True)
+media_path = settings.media_url_path if settings.media_url_path.startswith("/") else f"/{settings.media_url_path}"
+app.mount(media_path, StaticFiles(directory=media_dir), name="media")
 
 frontend_dir = Path(__file__).resolve().parent.parent / "web"
 if frontend_dir.exists():

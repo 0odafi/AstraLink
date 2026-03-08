@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./astralink.db"
     cors_origins: str = "*"
     release_manifest_path: str = "./releases/manifest.json"
+    media_root: str = "./media"
+    media_url_path: str = "/media"
+    max_upload_bytes: int = 25 * 1024 * 1024
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

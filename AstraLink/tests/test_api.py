@@ -298,6 +298,64 @@ def test_realtime_message_ack_and_seen_flow(client):
     assert alice_messages.json()[-1]["status"] == "read"
 
 
+def test_media_upload_and_message_attachment_flow(client):
+    alice = _register(client, "media_alice", "media_alice@test.dev")
+    bob = _register(client, "media_bob", "media_bob@test.dev")
+
+    alice_headers = _auth_headers(alice["access_token"])
+    bob_headers = _auth_headers(bob["access_token"])
+
+    created_chat = client.post(
+        "/api/chats",
+        headers=alice_headers,
+        json={
+            "title": "Media chat",
+            "description": "Attachment checks",
+            "type": "group",
+            "member_ids": [bob["user"]["id"]],
+        },
+    )
+    assert created_chat.status_code == 201, created_chat.text
+    chat_id = created_chat.json()["id"]
+
+    upload = client.post(
+        "/api/media/upload",
+        headers=alice_headers,
+        params={"chat_id": chat_id},
+        files={"file": ("hello.txt", b"hello media", "text/plain")},
+    )
+    assert upload.status_code == 201, upload.text
+    upload_payload = upload.json()
+    media_id = upload_payload["id"]
+    assert upload_payload["file_name"] == "hello.txt"
+    assert upload_payload["mime_type"] == "text/plain"
+    assert upload_payload["url"].startswith("/media/")
+
+    sent = client.post(
+        f"/api/chats/{chat_id}/messages",
+        headers=alice_headers,
+        json={"content": "", "attachment_ids": [media_id]},
+    )
+    assert sent.status_code == 201, sent.text
+    sent_payload = sent.json()
+    assert sent_payload["content"] == ""
+    assert len(sent_payload["attachments"]) == 1
+    assert sent_payload["attachments"][0]["id"] == media_id
+    assert sent_payload["attachments"][0]["url"].startswith("/media/")
+
+    bob_messages = client.get(f"/api/chats/{chat_id}/messages", headers=bob_headers)
+    assert bob_messages.status_code == 200, bob_messages.text
+    latest = bob_messages.json()[-1]
+    assert latest["attachments"][0]["id"] == media_id
+
+    reused = client.post(
+        f"/api/chats/{chat_id}/messages",
+        headers=alice_headers,
+        json={"content": "Reuse should fail", "attachment_ids": [media_id]},
+    )
+    assert reused.status_code == 400
+
+
 def test_refresh_token_rotation_flow(client):
     user = _register(client, "refresh_alice", "refresh_alice@test.dev")
     first_refresh = user.get("refresh_token")

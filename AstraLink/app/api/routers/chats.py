@@ -133,6 +133,7 @@ async def post_message(
             content=payload.content,
             reply_to_message_id=payload.reply_to_message_id,
             forward_from_message_id=payload.forward_from_message_id,
+            attachment_ids=payload.attachment_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
