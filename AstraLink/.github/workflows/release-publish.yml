@@ -135,7 +135,7 @@ jobs:
             --platform windows \
             --version "$VERSION" \
             --channel "$CHANNEL" \
-            --download-url "${{ secrets.RELEASES_PUBLIC_BASE_URL }}/astralink/windows/$VERSION/astralink_windows_${SAFE_VERSION}.zip" \
+            --download-url "https://volds.ru/files/astralink/windows/$VERSION/astralink_windows_${SAFE_VERSION}.zip" \
             --notes "Windows release $VERSION" \
             $MANDATORY_FLAG
           python scripts/update_manifest.py \
@@ -143,7 +143,7 @@ jobs:
             --platform android \
             --version "$VERSION" \
             --channel "$CHANNEL" \
-            --download-url "${{ secrets.RELEASES_PUBLIC_BASE_URL }}/astralink/android/$VERSION/app-release.apk" \
+            --download-url "https://volds.ru/files/astralink/android/$VERSION/app-release.apk" \
             --notes "Android release $VERSION" \
             $MANDATORY_FLAG
       - name: Configure SSH
@@ -154,12 +154,10 @@ jobs:
       - name: Upload release files to server
         run: |
           VERSION="${{ needs.resolve.outputs.version }}"
-          HOST="${{ secrets.DEPLOY_HOST }}"
-          USER="${{ secrets.DEPLOY_USER }}"
-          PORT="${{ secrets.DEPLOY_PORT }}"
-          RELEASES_PATH="${{ secrets.DEPLOY_RELEASES_PATH }}"
-          PORT="${PORT:-22}"
-          RELEASES_PATH="${RELEASES_PATH:-/opt/astralink/releases}"
+          HOST="87.120.84.205"
+          USER="root"
+          PORT="22"
+          RELEASES_PATH="/opt/astralink/releases"
           ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" "mkdir -p '$RELEASES_PATH/astralink/windows/$VERSION' '$RELEASES_PATH/astralink/android/$VERSION'"
           scp -P "$PORT" -o StrictHostKeyChecking=no "publish/astralink/windows/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/windows/$VERSION/"
           scp -P "$PORT" -o StrictHostKeyChecking=no "publish/astralink/android/$VERSION/"* "$USER@$HOST:$RELEASES_PATH/astralink/android/$VERSION/"
@@ -167,4 +165,4 @@ jobs:
       - name: Show summary
         run: |
           echo "Published version ${{ needs.resolve.outputs.version }}"
-          echo "Manifest -> ${{ secrets.RELEASES_PUBLIC_BASE_URL }}/manifest.json"
+          echo "Manifest -> https://volds.ru/files/manifest.json"

@@ -53,6 +53,9 @@ class ChatMember(Base):
     chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[MemberRole] = mapped_column(SqlEnum(MemberRole), default=MemberRole.MEMBER, nullable=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    folder: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     chat: Mapped["Chat"] = relationship(back_populates="memberships")

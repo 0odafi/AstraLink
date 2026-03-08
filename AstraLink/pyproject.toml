@@ -1,7 +1,7 @@
 [project]
 name = "astralink"
 version = "0.1.0"
-description = "A scalable messenger-social network backend foundation."
+description = "A phone-first messenger backend foundation."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",

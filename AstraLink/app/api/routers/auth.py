@@ -2,16 +2,43 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
+from app.schemas.auth import (
+    LoginRequest,
+    PhoneCodeRequest,
+    PhoneCodeResponse,
+    PhoneCodeVerifyRequest,
+    RefreshRequest,
+    RegisterRequest,
+    TokenResponse,
+)
 from app.services.auth_service import (
     authenticate_user,
     build_token_response,
+    request_phone_login_code,
     register_user,
     revoke_refresh_token,
     rotate_refresh_token,
+    verify_phone_login_code,
 )
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+@router.post("/request-code", response_model=PhoneCodeResponse)
+def request_code(payload: PhoneCodeRequest, db: Session = Depends(get_db)) -> PhoneCodeResponse:
+    try:
+        return request_phone_login_code(db, payload.phone)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/verify-code", response_model=TokenResponse)
+def verify_code(payload: PhoneCodeVerifyRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    try:
+        user = verify_phone_login_code(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return build_token_response(db, user)
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)

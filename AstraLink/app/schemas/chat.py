@@ -24,8 +24,24 @@ class ChatOut(BaseModel):
     last_message_preview: str | None = None
     last_message_at: datetime | None = None
     unread_count: int = 0
+    is_archived: bool = False
+    is_pinned: bool = False
+    folder: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class ChatStateUpdate(BaseModel):
+    is_archived: bool | None = None
+    is_pinned: bool | None = None
+    folder: str | None = Field(default=None, max_length=32)
+
+
+class ChatStateOut(BaseModel):
+    chat_id: int
+    is_archived: bool
+    is_pinned: bool
+    folder: str | None
 
 
 class ChatMemberAdd(BaseModel):
@@ -87,6 +103,15 @@ class ReactionCreate(BaseModel):
 class MessageCursorOut(BaseModel):
     items: list[MessageOut]
     next_before_id: int | None = None
+
+
+class MessageSearchOut(BaseModel):
+    chat_id: int
+    message_id: int
+    chat_title: str
+    sender_id: int
+    content: str
+    created_at: datetime
 
 
 class MessageUpdate(BaseModel):

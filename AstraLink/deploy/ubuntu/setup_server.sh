@@ -8,7 +8,7 @@ fi
 
 APP_USER="astralink"
 BASE_DIR="/opt/astralink"
-APP_DIR="$BASE_DIR/app"
+APP_DIR="$BASE_DIR"
 VENV_DIR="$BASE_DIR/venv"
 RELEASES_DIR="$BASE_DIR/releases"
 ENV_DIR="/etc/astralink"

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routers import auth, chats, customization, media, realtime, releases, social, users
+from app.api.routers import auth, chats, realtime, releases, users
 from app.core.config import get_settings
 from app.core.database import create_tables
 
@@ -22,7 +22,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="A messenger-social network API with realtime chat and customization.",
+    description="A messenger API with phone auth, chats and realtime events.",
     lifespan=lifespan,
 )
 
@@ -51,9 +51,6 @@ def health() -> dict[str, str]:
 app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
-app.include_router(media.router, prefix="/api")
-app.include_router(social.router, prefix="/api")
-app.include_router(customization.router, prefix="/api")
 app.include_router(releases.router, prefix="/api")
 app.include_router(realtime.router, prefix="/api/realtime")
 

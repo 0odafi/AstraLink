@@ -21,14 +21,29 @@ from app.models.chat import (
 )
 from app.models.user import User
 from app.schemas.chat import ChatCreate, MessageAttachmentOut, MessageOut, MessageReactionSummary
+from app.services.user_service import find_user_by_phone_or_username
 
 
 def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
-    if payload.type.value == "private" and len(payload.member_ids) != 1:
-        raise ValueError("Private chats must include exactly one target user ID")
+    if payload.type.value == "private":
+        if len(payload.member_ids) != 1:
+            raise ValueError("Private chats must include exactly one target user ID")
+        target_user_id = payload.member_ids[0]
+        if target_user_id == owner_id:
+            raise ValueError("You cannot create private chat with yourself")
+        target_user = db.scalar(select(User).where(User.id == target_user_id))
+        if not target_user:
+            raise ValueError("Target user does not exist")
+
+        existing_private = _find_private_chat_between(db, owner_id=owner_id, peer_id=target_user_id)
+        if existing_private:
+            return existing_private
+        title = target_user.username
+    else:
+        title = payload.title
 
     chat = Chat(
-        title=payload.title,
+        title=title,
         description=payload.description,
         type=payload.type,
         is_public=payload.is_public,
@@ -49,14 +64,75 @@ def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
     return chat
 
 
-def get_user_chats(db: Session, user_id: int) -> list[Chat]:
+def _find_private_chat_between(db: Session, owner_id: int, peer_id: int) -> Chat | None:
+    owner_private_chats = list(
+        db.scalars(
+            select(Chat)
+            .join(ChatMember, ChatMember.chat_id == Chat.id)
+            .where(and_(Chat.type == ChatType.PRIVATE, ChatMember.user_id == owner_id))
+        ).all()
+    )
+    for chat in owner_private_chats:
+        members = set(db.scalars(select(ChatMember.user_id).where(ChatMember.chat_id == chat.id)).all())
+        if members == {owner_id, peer_id}:
+            return chat
+    return None
+
+
+def create_or_get_private_chat(db: Session, owner_id: int, query: str) -> Chat:
+    target_user = find_user_by_phone_or_username(db, query)
+    if not target_user:
+        raise ValueError("User not found")
+    payload = ChatCreate(
+        title=target_user.username,
+        description="",
+        type=ChatType.PRIVATE,
+        member_ids=[target_user.id],
+    )
+    return create_chat(db, owner_id=owner_id, payload=payload)
+
+
+def _private_chat_display_name(db: Session, chat_id: int, user_id: int, fallback: str) -> str:
+    member_ids = list(db.scalars(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id)).all())
+    peer_id = next((member_id for member_id in member_ids if member_id != user_id), None)
+    if peer_id is None:
+        return fallback
+    peer_user = db.scalar(select(User).where(User.id == peer_id))
+    if peer_user is None:
+        return fallback
+    peer_name = " ".join(part for part in [peer_user.first_name, peer_user.last_name] if part).strip()
+    return peer_name or peer_user.username or fallback
+
+
+def get_user_chats(
+    db: Session,
+    user_id: int,
+    *,
+    include_archived: bool = False,
+    archived_only: bool = False,
+    pinned_only: bool = False,
+    folder: str | None = None,
+) -> list[Chat]:
     statement = (
-        select(Chat)
+        select(Chat, ChatMember)
         .join(ChatMember, ChatMember.chat_id == Chat.id)
         .where(ChatMember.user_id == user_id)
     )
-    chats = list(db.scalars(statement).all())
-    for chat in chats:
+    if archived_only:
+        statement = statement.where(ChatMember.is_archived.is_(True))
+    elif not include_archived:
+        statement = statement.where(ChatMember.is_archived.is_(False))
+    if pinned_only:
+        statement = statement.where(ChatMember.is_pinned.is_(True))
+    if folder is not None:
+        normalized_folder = folder.strip().lower()
+        if normalized_folder:
+            statement = statement.where(ChatMember.folder == normalized_folder)
+
+    rows = db.execute(statement).all()
+    chats: list[Chat] = []
+
+    for chat, membership in rows:
         last_message = db.scalar(
             select(Message).where(Message.chat_id == chat.id).order_by(Message.id.desc()).limit(1)
         )
@@ -86,13 +162,92 @@ def get_user_chats(db: Session, user_id: int) -> list[Chat]:
             )
         )
 
+        if chat.type == ChatType.PRIVATE:
+            setattr(chat, "title", _private_chat_display_name(db, chat.id, user_id, chat.title))
+
         setattr(chat, "last_message_preview", last_preview)
         setattr(chat, "last_message_at", last_message.created_at if last_message else None)
         setattr(chat, "unread_count", int(unread_count or 0))
+        setattr(chat, "is_archived", bool(membership.is_archived))
+        setattr(chat, "is_pinned", bool(membership.is_pinned))
+        setattr(chat, "folder", membership.folder)
         setattr(chat, "_sort_ts", last_message.created_at if last_message else chat.created_at)
+        chats.append(chat)
 
     chats.sort(key=lambda chat: getattr(chat, "_sort_ts", chat.created_at), reverse=True)
+    chats.sort(key=lambda chat: 0 if getattr(chat, "is_pinned", False) else 1)
     return chats
+
+
+def update_chat_state(
+    db: Session,
+    *,
+    chat_id: int,
+    user_id: int,
+    is_archived: bool | None = None,
+    is_pinned: bool | None = None,
+    folder: str | None = None,
+) -> ChatMember:
+    membership = _require_member(db, chat_id=chat_id, user_id=user_id)
+    if is_archived is not None:
+        membership.is_archived = is_archived
+        if is_archived:
+            membership.is_pinned = False
+    if is_pinned is not None:
+        membership.is_pinned = bool(is_pinned) and not membership.is_archived
+    if folder is not None:
+        normalized_folder = folder.strip().lower()
+        membership.folder = normalized_folder or None
+
+    db.add(membership)
+    db.commit()
+    db.refresh(membership)
+    return membership
+
+
+def search_messages(
+    db: Session,
+    *,
+    user_id: int,
+    query: str,
+    limit: int = 30,
+) -> list[dict]:
+    cleaned = query.strip()
+    if len(cleaned) < 2:
+        return []
+
+    statement = (
+        select(Message, Chat, ChatMember)
+        .join(Chat, Chat.id == Message.chat_id)
+        .join(
+            ChatMember,
+            and_(
+                ChatMember.chat_id == Message.chat_id,
+                ChatMember.user_id == user_id,
+            ),
+        )
+        .where(Message.content.ilike(f"%{cleaned}%"))
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(limit)
+    )
+
+    rows = db.execute(statement).all()
+    output: list[dict] = []
+    for message, chat, _membership in rows:
+        title = chat.title
+        if chat.type == ChatType.PRIVATE:
+            title = _private_chat_display_name(db, chat.id, user_id, chat.title)
+        output.append(
+            {
+                "chat_id": chat.id,
+                "message_id": message.id,
+                "chat_title": title,
+                "sender_id": message.sender_id,
+                "content": message.content,
+                "created_at": message.created_at,
+            }
+        )
+    return output
 
 
 def get_chat_for_member(db: Session, chat_id: int, user_id: int) -> Chat:

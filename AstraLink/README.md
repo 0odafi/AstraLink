@@ -1,16 +1,23 @@
-# AstraLink
+# AstraLink Messenger Reboot
 
-AstraLink is a production-ready backend foundation for a messenger + social network platform with:
+This repository was rebuilt into a messenger-first architecture (Telegram-style flow), focused on:
 
-- account system with JWT auth
-- chats (private/group/channel model), messages, reactions
-- realtime chat transport via WebSocket
-- social layer (posts, feed, follow graph, reactions)
-- advanced per-user customization settings (theme/layout/notifications/privacy)
+- phone number authentication with one-time code
+- username system (set/update after sign-in)
+- private chats and message timeline
+- global realtime channel for message/status events
+- in-app release checks (`/api/releases/latest/{platform}`)
 
-This is a strong starting point for a project that can evolve beyond Telegram-level customization with modular architecture and clear extension points.
+Social-network modules are no longer part of the active runtime path.
 
-## 1. Quick Start
+## Stack
+
+- Backend: FastAPI + SQLAlchemy
+- Client: Flutter (Android / Windows / Web)
+- Auth: JWT access + refresh rotation
+- Realtime: WebSocket global user channel
+
+## Quick Start (Backend)
 
 ```powershell
 cd C:\Users\odafi\Desktop\AstraLink
@@ -21,141 +28,100 @@ Copy-Item .env.example .env
 uvicorn app.main:app --reload
 ```
 
-Open Swagger:
+Open:
 
 - [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- [http://127.0.0.1:8000/](http://127.0.0.1:8000/) (AstraLink web console)
+- [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
-Health check:
+## SMS Provider Setup
 
-- `GET /health`
+### Send from your own phone number (Android gateway)
 
-## 2. Demo Data
+Use any Android SMS gateway app that exposes an HTTP endpoint and sends SMS via device SIM.
+Configure backend:
 
-```powershell
-python -m scripts.seed_demo
+```env
+SMS_PROVIDER=android_gateway
+SMS_GATEWAY_URL=https://your-gateway-endpoint/send
+SMS_GATEWAY_API_KEY=your_secret_token
+SMS_GATEWAY_AUTH_HEADER=Authorization
+SMS_GATEWAY_AUTH_PREFIX=Bearer
+SMS_GATEWAY_TO_FIELD=to
+SMS_GATEWAY_MESSAGE_FIELD=message
 ```
 
-Demo users:
+Backend will POST JSON like:
 
-- `alice / Password123`
-- `bob / Password123`
-- `carol / Password123`
+```json
+{
+  "to": "+79001234567",
+  "message": "AstraLink API: 12345"
+}
+```
 
-## 3. API Capabilities
+Requirements:
+- your Android phone must stay online
+- gateway app must have SMS permission
+- endpoint must be reachable from backend server
 
-### Auth
-- `POST /api/auth/register`
-- `POST /api/auth/login`
+### Twilio
+Set in `.env`:
+
+```env
+SMS_PROVIDER=twilio
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_FROM=+1xxxxxxxxxx
+# or TWILIO_MESSAGING_SERVICE_SID=MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+For automated tests / local fake mode:
+
+```env
+SMS_PROVIDER=test
+AUTH_TEST_CODE=12345
+```
+
+## Quick Start (Flutter)
+
+```powershell
+cd C:\Users\odafi\Desktop\AstraLink\astralink_app
+flutter pub get
+flutter run
+```
+
+To point app at server:
+
+```powershell
+flutter run --dart-define=ASTRALINK_API_BASE_URL=https://volds.ru
+```
+
+## API (Core)
+
+- `POST /api/auth/request-code`
+- `POST /api/auth/verify-code`
 - `POST /api/auth/refresh`
-- `POST /api/auth/logout`
-
-### Users + Social Graph
 - `GET /api/users/me`
 - `PATCH /api/users/me`
 - `GET /api/users/search?q=...`
-- `GET /api/users/by-uid/{uid}`
-- `POST /api/users/{user_id}/follow`
-- `DELETE /api/users/{user_id}/follow`
-- `GET /api/users/{user_id}/followers`
-- `GET /api/users/{user_id}/following`
-
-### Chats + Messages
-- `POST /api/chats`
+- `GET /api/users/lookup?q=...`
 - `GET /api/chats`
-- `POST /api/chats/{chat_id}/members`
+- `POST /api/chats/private?query=...`
+- `PATCH /api/chats/{chat_id}/state` (archive / pin / folder)
 - `GET /api/chats/{chat_id}/messages`
 - `POST /api/chats/{chat_id}/messages`
-- `POST /api/chats/messages/{message_id}/reactions`
-- `DELETE /api/chats/messages/{message_id}/reactions?emoji=...`
-
-### Realtime
-- `WS /api/realtime/chats/{chat_id}/ws?token=<jwt>`
-- Incoming events: `ping`, `message`
-- Outgoing events: `ready`, `pong`, `message`, `error`
-
-### Social Feed
-- `POST /api/social/posts`
-- `GET /api/social/feed`
-- `GET /api/social/users/{user_id}/posts`
-- `POST /api/social/posts/{post_id}/reactions`
-- `DELETE /api/social/posts/{post_id}/reactions?emoji=...`
-
-### Customization
-- `GET /api/customization/me`
-- `PUT /api/customization/me`
-
-### Releases / Updates
+- `GET /api/chats/messages/search?q=...`
+- `WS /api/realtime/me/ws?token=<jwt>`
 - `GET /api/releases/latest/{platform}?channel=stable`
-- Manifest file: `releases/manifest.json`
-- Manifest update helper: `python scripts/update_manifest.py --help`
 
-## 4. Tests
+## Tests
 
 ```powershell
 pytest -q
 ```
 
-## 5. Build Outputs (Windows + Android)
+## CI / Releases
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -Version 1.0.0+1
-powershell -ExecutionPolicy Bypass -File scripts\build_android.ps1 -Version 1.0.0+1 -BuildAab
-```
-
-Artifacts are placed in `dist/windows/<version>` and `dist/android/<version>`.
-
-## 6. CI Workflow
-
-- GitHub Actions workflow: `.github/workflows/flutter-build.yml`
-- Trigger by tag push (`v*`) or manual run.
-- Produces Windows release folder and Android APK artifacts.
-
-## 7. Auto Publish To Ubuntu Server
-
-- Workflow: `.github/workflows/release-publish.yml`
-- Server setup guide: `deploy/ubuntu/README.md`
-- Required GitHub secrets: `deploy/github-secrets.md`
-- Current target server: `root@87.120.84.205` (`volds.ru`)
-- Publish trigger:
-  - manual workflow run with version input
-  - push tag like `v1.0.1+2`
-
-## 8. Current Architecture
-
-```
-app/
-  api/          # FastAPI routers + dependencies
-  core/         # config, DB, security
-  models/       # ORM models
-  schemas/      # request/response contracts
-  services/     # domain logic
-  realtime/     # websocket connection manager
-```
-
-## 9. Telegram+ Roadmap
-
-### Stage A - Product Core
-- media uploads with object storage and CDN
-- message edit/delete history
-- threaded replies, pinning, scheduling
-- ephemeral stories and short-form clips
-
-### Stage B - Scale + Reliability
-- PostgreSQL + Alembic migrations
-- Redis (presence, pub/sub fanout, rate limits)
-- background workers (Celery/RQ/Arq)
-- full observability (OpenTelemetry + Prometheus/Grafana)
-
-### Stage C - Differentiation
-- deep profile/theme packs and custom UI layout marketplace
-- community plugins/bots with permission sandboxing
-- AI assistants for moderation/summarization/translation
-- cross-device encrypted cloud sync and multi-session controls
-
-## 10. Security Notes
-
-- Use a strong `SECRET_KEY` in production.
-- Add HTTPS termination and WAF/rate-limit rules.
-- Move from auto-table creation to migration-based deployment.
-- Add E2EE design for direct chats and key-management services before production launch.
+- Manifest file: `releases/manifest.json`
+- Release endpoint reads it: `/api/releases/latest/{platform}`
+- Client checks updates from Settings tab.

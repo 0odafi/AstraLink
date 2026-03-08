@@ -7,7 +7,7 @@ void main() {
   testWidgets('AstraLink app boots', (WidgetTester tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
-    await tester.pumpWidget(const AstraLinkApp());
+    await tester.pumpWidget(const AstraMessengerApp());
     await tester.pump(const Duration(milliseconds: 200));
 
     expect(find.textContaining('AstraLink'), findsWidgets);

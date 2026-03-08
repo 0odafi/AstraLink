@@ -13,23 +13,29 @@ from app.schemas.chat import (
     MessageCreate,
     MessageCursorOut,
     MessageOut,
+    MessageSearchOut,
+    ChatStateOut,
+    ChatStateUpdate,
     MessageUpdate,
     ReactionCreate,
 )
 from app.services.chat_service import (
     add_member,
     chat_member_ids,
+    create_or_get_private_chat,
     create_chat,
     create_message,
     delete_message,
     get_user_chats,
     list_messages,
     list_messages_cursor,
+    search_messages,
     pin_message,
     react_to_message,
     remove_message_reaction,
     serialize_messages,
     unpin_message,
+    update_chat_state,
     update_message_content,
 )
 
@@ -56,11 +62,83 @@ def create_chat_endpoint(
 
 @router.get("", response_model=list[ChatOut])
 def list_chats(
+    include_archived: bool = Query(default=False),
+    archived_only: bool = Query(default=False),
+    pinned_only: bool = Query(default=False),
+    folder: str | None = Query(default=None, min_length=1, max_length=32),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ChatOut]:
-    chats = get_user_chats(db, user_id=current_user.id)
+    chats = get_user_chats(
+        db,
+        user_id=current_user.id,
+        include_archived=include_archived,
+        archived_only=archived_only,
+        pinned_only=pinned_only,
+        folder=folder,
+    )
     return [ChatOut.model_validate(chat) for chat in chats]
+
+
+@router.post("/private", response_model=ChatOut)
+def open_private_chat(
+    query: str = Query(..., min_length=3, max_length=120),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ChatOut:
+    try:
+        chat = create_or_get_private_chat(db, owner_id=current_user.id, query=query)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = status.HTTP_404_NOT_FOUND if message.lower() == "user not found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    return ChatOut.model_validate(chat)
+
+
+@router.patch("/{chat_id}/state", response_model=ChatStateOut)
+async def patch_chat_state(
+    chat_id: int,
+    payload: ChatStateUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ChatStateOut:
+    try:
+        membership = update_chat_state(
+            db,
+            chat_id=chat_id,
+            user_id=current_user.id,
+            is_archived=payload.is_archived,
+            is_pinned=payload.is_pinned,
+            folder=payload.folder,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    state_payload = {
+        "type": "chat_state",
+        "chat_id": chat_id,
+        "is_archived": membership.is_archived,
+        "is_pinned": membership.is_pinned,
+        "folder": membership.folder,
+    }
+    await user_realtime_manager.broadcast(current_user.id, state_payload)
+    return ChatStateOut(
+        chat_id=chat_id,
+        is_archived=membership.is_archived,
+        is_pinned=membership.is_pinned,
+        folder=membership.folder,
+    )
+
+
+@router.get("/messages/search", response_model=list[MessageSearchOut])
+def search_chat_messages(
+    q: str = Query(..., min_length=2, max_length=250),
+    limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[MessageSearchOut]:
+    rows = search_messages(db, user_id=current_user.id, query=q, limit=limit)
+    return [MessageSearchOut(**row) for row in rows]
 
 
 @router.post("/{chat_id}/members", status_code=status.HTTP_201_CREATED)

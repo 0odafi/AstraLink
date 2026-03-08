@@ -36,7 +36,7 @@ Install backend dependencies into server venv:
 
 ```bash
 sudo -u astralink /opt/astralink/venv/bin/pip install --upgrade pip
-sudo -u astralink /opt/astralink/venv/bin/pip install -e /opt/astralink/app
+sudo -u astralink /opt/astralink/venv/bin/pip install -e /opt/astralink
 sudo systemctl restart astralink-api
 ```
 
@@ -53,7 +53,7 @@ Enable HTTPS:
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d your-domain.example
+sudo certbot --nginx -d volds.ru
 ```
 
 ## 5. Releases path
@@ -66,7 +66,7 @@ The auto-publish pipeline uploads files into:
 
 Public URL base in this nginx config is:
 
-- `https://your-domain.example/files`
+- `https://volds.ru/files`
 
 ## 6. SSH for GitHub Actions
 
@@ -85,4 +85,4 @@ cat astralink_release.pub >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 ```
 
-Set GitHub secrets from `deploy/github-secrets.md`.
+Set GitHub secret `DEPLOY_SSH_KEY` from `deploy/github-secrets.md`.

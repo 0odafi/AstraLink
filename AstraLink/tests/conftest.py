@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_astralink.db"
 os.environ["SECRET_KEY"] = "test-secret-key-astralink-min-32-bytes"
+os.environ["SMS_PROVIDER"] = "test"
+os.environ["AUTH_TEST_CODE"] = "12345"
 
 from app.main import app  # noqa: E402
 from app.core.database import engine  # noqa: E402
