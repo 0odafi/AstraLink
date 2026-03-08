@@ -1,13 +1,12 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'api.dart';
 import 'models.dart';
+import 'realtime.dart';
 import 'session.dart';
 
 extension AdaptiveSize on BuildContext {
@@ -578,23 +577,78 @@ class _ChatsTabState extends State<ChatsTab> {
   bool _searchingMessages = false;
   List<MessageSearchHit> _messageHits = const [];
   String _activeFilter = 'all';
+  RealtimeMeSocket? _realtime;
+  Timer? _refreshDebounce;
+  bool _socketConnected = false;
 
   @override
   void initState() {
     super.initState();
     unawaited(_loadChats());
+    _startRealtime();
   }
 
   @override
   void dispose() {
+    _refreshDebounce?.cancel();
+    _realtime?.stop();
     _searchController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadChats() async {
+  String _buildRealtimeUrl() {
+    final tokens = widget.getTokens();
+    if (tokens == null) return '';
+    return '${webSocketBase(widget.api.baseUrl)}/api/realtime/me/ws?token=${Uri.encodeComponent(tokens.accessToken)}';
+  }
+
+  void _startRealtime() {
+    _realtime?.stop();
+    _realtime = RealtimeMeSocket(
+      urlBuilder: _buildRealtimeUrl,
+      onEvent: _handleRealtimeEvent,
+      onState: (state) {
+        if (!mounted) return;
+        final connected = state == RealtimeState.connected;
+        if (_socketConnected != connected) {
+          setState(() => _socketConnected = connected);
+        }
+        if (connected) {
+          _scheduleBackgroundRefresh();
+        }
+      },
+    )..start();
+  }
+
+  void _handleRealtimeEvent(Map<String, dynamic> event) {
+    final type = (event['type'] ?? '').toString();
+    if (type.isEmpty) return;
+    switch (type) {
+      case 'ready':
+      case 'message':
+      case 'message_status':
+      case 'message_updated':
+      case 'message_deleted':
+      case 'chat_state':
+        _scheduleBackgroundRefresh();
+        break;
+      default:
+        break;
+    }
+  }
+
+  void _scheduleBackgroundRefresh() {
+    _refreshDebounce?.cancel();
+    _refreshDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (!mounted) return;
+      unawaited(_loadChats(silent: true));
+    });
+  }
+
+  Future<void> _loadChats({bool silent = false}) async {
     final tokens = widget.getTokens();
     if (tokens == null) return;
-    if (mounted) setState(() => _loading = true);
+    if (mounted && !silent) setState(() => _loading = true);
     try {
       final chats = await widget.api.listChats(
         accessToken: tokens.accessToken,
@@ -607,9 +661,11 @@ class _ChatsTabState extends State<ChatsTab> {
         _all = chats;
       });
     } catch (error) {
-      _showSnack(error.toString());
+      if (!silent) {
+        _showSnack(error.toString());
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && !silent) setState(() => _loading = false);
     }
   }
 
@@ -784,6 +840,14 @@ class _ChatsTabState extends State<ChatsTab> {
       appBar: AppBar(
         title: const Text('Chats'),
         actions: [
+          Icon(
+            _socketConnected
+                ? Icons.cloud_done_rounded
+                : Icons.cloud_off_rounded,
+            color: _socketConnected
+                ? Theme.of(context).colorScheme.primary
+                : Theme.of(context).colorScheme.error,
+          ),
           IconButton(
             onPressed: _loadChats,
             icon: const Icon(Icons.refresh_rounded),
@@ -1056,23 +1120,26 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _loading = true;
   bool _sending = false;
   List<MessageItem> _messages = const [];
-
-  WebSocketChannel? _channel;
-  StreamSubscription? _wsSub;
+  RealtimeMeSocket? _realtime;
+  Timer? _typingPauseTimer;
+  bool _typingSent = false;
+  bool _socketConnected = false;
+  final Set<int> _typingUserIds = <int>{};
 
   @override
   void initState() {
     super.initState();
     unawaited(_loadMessages());
-    _connectSocket();
+    _startRealtime();
   }
 
   @override
   void dispose() {
+    _notifyTypingStopped();
+    _typingPauseTimer?.cancel();
+    _realtime?.stop();
     _messageController.dispose();
     _scrollController.dispose();
-    _wsSub?.cancel();
-    _channel?.sink.close();
     super.dispose();
   }
 
@@ -1092,6 +1159,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages = rows;
       });
       _scrollToBottom();
+      _ackUnreadMessages();
     } catch (error) {
       _showSnack(error.toString());
     } finally {
@@ -1099,37 +1167,68 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _connectSocket() {
+  String _buildRealtimeUrl() {
     final tokens = widget.getTokens();
-    if (tokens == null) return;
-    final wsUrl =
-        '${webSocketBase(widget.api.baseUrl)}/api/realtime/me/ws?token=${Uri.encodeComponent(tokens.accessToken)}';
-    final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
-    _channel = channel;
-    _wsSub = channel.stream.listen(
-      (event) {
-        try {
-          final payload = event is String ? event : event.toString();
-          _handleSocketPayload(payload);
-        } catch (_) {
-          // ignore malformed payloads
-        }
-      },
-      onError: (_) {},
-      onDone: () {},
-    );
+    if (tokens == null) return '';
+    return '${webSocketBase(widget.api.baseUrl)}/api/realtime/me/ws?token=${Uri.encodeComponent(tokens.accessToken)}';
   }
 
-  void _handleSocketPayload(String payload) {
-    Map<String, dynamic> map;
-    try {
-      map = (jsonDecode(payload) as Map).cast<String, dynamic>();
-    } catch (_) {
+  void _startRealtime() {
+    _realtime?.stop();
+    _realtime = RealtimeMeSocket(
+      urlBuilder: _buildRealtimeUrl,
+      onEvent: _handleRealtimeEvent,
+      onState: (state) {
+        if (!mounted) return;
+        final connected = state == RealtimeState.connected;
+        if (_socketConnected != connected) {
+          setState(() => _socketConnected = connected);
+        }
+        if (connected) {
+          _ackUnreadMessages();
+        }
+      },
+    )..start();
+  }
+
+  bool _sendRealtime(Map<String, dynamic> payload) {
+    return _realtime?.sendJson(payload) ?? false;
+  }
+
+  void _handleRealtimeEvent(Map<String, dynamic> map) {
+    final type = map['type']?.toString();
+    if (type == null || type.isEmpty) return;
+
+    if (type == 'ready') {
+      _ackUnreadMessages();
       return;
     }
 
-    final type = map['type']?.toString();
-    if (type == null) return;
+    if (type == 'typing') {
+      final chatId = map['chat_id'];
+      final userId = map['user_id'];
+      if (chatId is! int || userId is! int) return;
+      if (chatId != widget.chat.id || userId == widget.me.id) return;
+      final isTyping = (map['is_typing'] ?? false) == true;
+      setState(() {
+        if (isTyping) {
+          _typingUserIds.add(userId);
+        } else {
+          _typingUserIds.remove(userId);
+        }
+      });
+      return;
+    }
+
+    if (type == 'presence') {
+      final chatId = map['chat_id'];
+      final userId = map['user_id'];
+      final status = (map['status'] ?? '').toString();
+      if (chatId is! int || userId is! int) return;
+      if (chatId != widget.chat.id || status != 'offline') return;
+      setState(() => _typingUserIds.remove(userId));
+      return;
+    }
 
     if (type == 'message') {
       final chatId = map['chat_id'];
@@ -1144,10 +1243,13 @@ class _ChatScreenState extends State<ChatScreen> {
           ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       });
       _scrollToBottom();
+      _ackMessageRead(item);
       return;
     }
 
     if (type == 'message_updated') {
+      final chatId = map['chat_id'];
+      if (chatId is! int || chatId != widget.chat.id) return;
       final message = map['message'];
       if (message is! Map) return;
       final item = MessageItem.fromJson(message.cast<String, dynamic>());
@@ -1160,8 +1262,10 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (type == 'message_deleted') {
+      final chatId = map['chat_id'];
       final messageId = map['message_id'];
-      if (messageId is! int) return;
+      if (chatId is! int || messageId is! int) return;
+      if (chatId != widget.chat.id) return;
       setState(() {
         _messages = _messages.where((row) => row.id != messageId).toList();
       });
@@ -1169,9 +1273,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (type == 'message_status') {
+      final chatId = map['chat_id'];
       final messageId = map['message_id'];
       final senderStatus = map['sender_status']?.toString();
-      if (messageId is! int || senderStatus == null) return;
+      if (chatId is! int || messageId is! int || senderStatus == null) return;
+      if (chatId != widget.chat.id) return;
       setState(() {
         _messages = _messages
             .map(
@@ -1192,6 +1298,57 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _ackUnreadMessages() {
+    for (final message in _messages) {
+      _ackMessageRead(message);
+    }
+  }
+
+  void _ackMessageRead(MessageItem message) {
+    if (message.chatId != widget.chat.id) return;
+    if (message.senderId == widget.me.id) return;
+    if (message.status == 'read') return;
+    _sendRealtime({
+      'type': 'seen',
+      'chat_id': widget.chat.id,
+      'message_id': message.id,
+    });
+  }
+
+  void _onComposerChanged(String _) {
+    final hasText = _messageController.text.trim().isNotEmpty;
+    if (hasText && !_typingSent) {
+      _typingSent = true;
+      _sendRealtime({
+        'type': 'typing',
+        'chat_id': widget.chat.id,
+        'is_typing': true,
+      });
+    }
+
+    _typingPauseTimer?.cancel();
+    if (!hasText) {
+      _notifyTypingStopped();
+      if (mounted) setState(() {});
+      return;
+    }
+
+    _typingPauseTimer = Timer(const Duration(seconds: 2), _notifyTypingStopped);
+    if (mounted) setState(() {});
+  }
+
+  void _notifyTypingStopped() {
+    _typingPauseTimer?.cancel();
+    _typingPauseTimer = null;
+    if (!_typingSent) return;
+    _typingSent = false;
+    _sendRealtime({
+      'type': 'typing',
+      'chat_id': widget.chat.id,
+      'is_typing': false,
+    });
+  }
+
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty || _sending) return;
@@ -1207,6 +1364,7 @@ class _ChatScreenState extends State<ChatScreen> {
         content: text,
       );
       _messageController.clear();
+      _notifyTypingStopped();
       final hasExisting = _messages.any((row) => row.id == sent.id);
       if (!hasExisting) {
         setState(() {
@@ -1243,7 +1401,36 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.chat.title)),
+      appBar: AppBar(
+        title: Text(widget.chat.title),
+        actions: [
+          Icon(
+            _socketConnected
+                ? Icons.wifi_tethering_rounded
+                : Icons.wifi_tethering_off_rounded,
+            color: _socketConnected
+                ? Theme.of(context).colorScheme.primary
+                : Theme.of(context).colorScheme.error,
+          ),
+          SizedBox(width: context.sp(12)),
+        ],
+        bottom: _typingUserIds.isEmpty
+            ? null
+            : PreferredSize(
+                preferredSize: Size.fromHeight(context.sp(20)),
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: context.sp(6)),
+                  child: Text(
+                    'typing...',
+                    style: TextStyle(
+                      fontSize: context.sp(13),
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+      ),
       body: Column(
         children: [
           Expanded(
@@ -1280,7 +1467,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       minLines: 1,
                       maxLines: 5,
                       decoration: const InputDecoration(hintText: 'Message'),
-                      onChanged: (_) => setState(() {}),
+                      onChanged: _onComposerChanged,
                     ),
                   ),
                   SizedBox(width: context.sp(8)),
@@ -1371,9 +1558,9 @@ class _MessageBubble extends StatelessWidget {
   String _statusMark(String status) {
     switch (status) {
       case 'read':
-        return '✓✓';
+        return '\u2713\u2713';
       case 'delivered':
-        return '✓';
+        return '\u2713';
       default:
         return '';
     }
@@ -1926,3 +2113,4 @@ class _ProfileTabState extends State<ProfileTab> {
     );
   }
 }
+
