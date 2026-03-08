@@ -17,7 +17,7 @@ from app.models.chat import (
     PinnedMessage,
 )
 from app.models.user import User
-from app.schemas.chat import ChatCreate, MessageOut
+from app.schemas.chat import ChatCreate, MessageOut, MessageReactionSummary
 
 
 def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
@@ -255,6 +255,12 @@ def serialize_messages(db: Session, messages: list[Message], user_id: int) -> li
     pinned_message_ids = set(
         db.scalars(select(PinnedMessage.message_id).where(PinnedMessage.message_id.in_(message_ids))).all()
     )
+    all_reactions = list(
+        db.scalars(select(MessageReaction).where(MessageReaction.message_id.in_(message_ids))).all()
+    )
+    reactions_by_message: dict[int, dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
+    for reaction in all_reactions:
+        reactions_by_message[reaction.message_id][reaction.emoji].add(reaction.user_id)
 
     result: list[MessageOut] = []
     for message in messages:
@@ -287,6 +293,14 @@ def serialize_messages(db: Session, messages: list[Message], user_id: int) -> li
                 reply_to_message_id=link.reply_to_message_id if link else None,
                 forwarded_from_message_id=link.forwarded_from_message_id if link else None,
                 is_pinned=message.id in pinned_message_ids,
+                reactions=[
+                    MessageReactionSummary(
+                        emoji=emoji,
+                        count=len(user_ids),
+                        reacted_by_me=user_id in user_ids,
+                    )
+                    for emoji, user_ids in sorted(reactions_by_message[message.id].items())
+                ],
             )
         )
     return result

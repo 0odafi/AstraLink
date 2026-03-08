@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.models.chat import Message
 from app.models.user import User
 from app.realtime.manager import chat_manager
 from app.schemas.chat import (
@@ -238,7 +240,7 @@ async def unpin_chat_message(
 
 
 @router.post("/messages/{message_id}/reactions", status_code=status.HTTP_201_CREATED)
-def add_message_reaction(
+async def add_message_reaction(
     message_id: int,
     payload: ReactionCreate,
     db: Session = Depends(get_db),
@@ -248,15 +250,47 @@ def add_message_reaction(
         reaction = react_to_message(db, message_id=message_id, user_id=current_user.id, emoji=payload.emoji)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return {"id": reaction.id, "message_id": reaction.message_id, "user_id": reaction.user_id, "emoji": reaction.emoji}
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    chat_id = message.chat_id if message else None
+    if chat_id is not None:
+        await chat_manager.broadcast(
+            chat_id,
+            {
+                "type": "reaction_added",
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "emoji": reaction.emoji,
+                "user_id": reaction.user_id,
+            },
+        )
+    return {
+        "id": reaction.id,
+        "chat_id": chat_id,
+        "message_id": reaction.message_id,
+        "user_id": reaction.user_id,
+        "emoji": reaction.emoji,
+    }
 
 
 @router.delete("/messages/{message_id}/reactions")
-def delete_message_reaction(
+async def delete_message_reaction(
     message_id: int,
     emoji: str = Query(..., min_length=1, max_length=12),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    chat_id = message.chat_id if message else None
     removed = remove_message_reaction(db, message_id=message_id, user_id=current_user.id, emoji=emoji)
-    return {"message_id": message_id, "emoji": emoji, "removed": removed}
+    if removed and chat_id is not None:
+        await chat_manager.broadcast(
+            chat_id,
+            {
+                "type": "reaction_removed",
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "emoji": emoji,
+                "user_id": current_user.id,
+            },
+        )
+    return {"chat_id": chat_id, "message_id": message_id, "emoji": emoji, "removed": removed}

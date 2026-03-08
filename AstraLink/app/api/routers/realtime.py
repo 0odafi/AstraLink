@@ -14,6 +14,7 @@ async def chat_socket(
     chat_id: int,
     token: str = Query(...),
 ) -> None:
+    user = None
     db = SessionLocal()
     try:
         user = get_current_user_from_raw_token(token, db)
@@ -26,8 +27,14 @@ async def chat_socket(
     finally:
         db.close()
 
-    await chat_manager.connect(chat_id, websocket)
+    first_connection_for_user = await chat_manager.connect(chat_id, websocket, user.id)
     await websocket.send_json({"type": "ready", "chat_id": chat_id, "user_id": user.id})
+    if first_connection_for_user:
+        await chat_manager.broadcast(
+            chat_id,
+            {"type": "presence", "chat_id": chat_id, "user_id": user.id, "status": "online"},
+            exclude=websocket,
+        )
 
     try:
         while True:
@@ -36,6 +43,20 @@ async def chat_socket(
 
             if event_type == "ping":
                 await websocket.send_json({"type": "pong"})
+                continue
+
+            if event_type == "typing":
+                is_typing = bool(incoming.get("is_typing", True))
+                await chat_manager.broadcast(
+                    chat_id,
+                    {
+                        "type": "typing",
+                        "chat_id": chat_id,
+                        "user_id": user.id,
+                        "is_typing": is_typing,
+                    },
+                    exclude=websocket,
+                )
                 continue
 
             if event_type != "message":
@@ -63,7 +84,17 @@ async def chat_socket(
 
             payload = serialized.model_dump(mode="json")
             await chat_manager.broadcast(chat_id, {"type": "message", "chat_id": chat_id, "message": payload})
-    except WebSocketDisconnect:
-        chat_manager.disconnect(chat_id, websocket)
-    except Exception:
-        chat_manager.disconnect(chat_id, websocket)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        disconnected_user_id, last_connection_for_user = chat_manager.disconnect(chat_id, websocket)
+        if disconnected_user_id is not None and last_connection_for_user:
+            await chat_manager.broadcast(
+                chat_id,
+                {
+                    "type": "presence",
+                    "chat_id": chat_id,
+                    "user_id": disconnected_user_id,
+                    "status": "offline",
+                },
+            )

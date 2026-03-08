@@ -623,11 +623,68 @@ class ApiClient {
         .toList();
   }
 
+  Future<Map<String, dynamic>> messagesCursor(
+    int chatId, {
+    int limit = 40,
+    int? beforeId,
+  }) async {
+    final query = <String>['limit=$limit'];
+    if (beforeId != null) {
+      query.add('before_id=$beforeId');
+    }
+    final result = await _request(
+      'GET',
+      '/api/chats/$chatId/messages/cursor?${query.join('&')}',
+    );
+    return Map<String, dynamic>.from(result as Map);
+  }
+
   Future<Map<String, dynamic>> sendMessage(int chatId, String content) async {
     final result = await _request(
       'POST',
       '/api/chats/$chatId/messages',
       body: {'content': content},
+    );
+    return Map<String, dynamic>.from(result as Map);
+  }
+
+  Future<Map<String, dynamic>> updateMessage(
+    int messageId,
+    String content,
+  ) async {
+    final result = await _request(
+      'PATCH',
+      '/api/chats/messages/$messageId',
+      body: {'content': content},
+    );
+    return Map<String, dynamic>.from(result as Map);
+  }
+
+  Future<Map<String, dynamic>> deleteMessage(int messageId) async {
+    final result = await _request('DELETE', '/api/chats/messages/$messageId');
+    return Map<String, dynamic>.from(result as Map);
+  }
+
+  Future<Map<String, dynamic>> addMessageReaction(
+    int messageId,
+    String emoji,
+  ) async {
+    final result = await _request(
+      'POST',
+      '/api/chats/messages/$messageId/reactions',
+      body: {'emoji': emoji},
+    );
+    return Map<String, dynamic>.from(result as Map);
+  }
+
+  Future<Map<String, dynamic>> removeMessageReaction(
+    int messageId,
+    String emoji,
+  ) async {
+    final encoded = Uri.encodeQueryComponent(emoji);
+    final result = await _request(
+      'DELETE',
+      '/api/chats/messages/$messageId/reactions?emoji=$encoded',
     );
     return Map<String, dynamic>.from(result as Map);
   }
@@ -1409,6 +1466,11 @@ class _ChatsPageState extends State<ChatsPage> {
   Timer? _realtimeHeartbeatTimer;
   Timer? _chatsRefreshTimer;
   Timer? _activeThreadSyncTimer;
+  Timer? _typingStopTimer;
+  int? _messagesNextBeforeId;
+  bool _loadingOlderMessages = false;
+  final Map<int, DateTime> _typingUsers = {};
+  final Set<int> _onlineUsers = {};
 
   @override
   void initState() {
@@ -1422,6 +1484,7 @@ class _ChatsPageState extends State<ChatsPage> {
     _realtimeHeartbeatTimer?.cancel();
     _chatsRefreshTimer?.cancel();
     _activeThreadSyncTimer?.cancel();
+    _typingStopTimer?.cancel();
     _closeAllRealtime();
     _chatSearchController.dispose();
     _uidSearchController.dispose();
@@ -1520,6 +1583,63 @@ class _ChatsPageState extends State<ChatsPage> {
     }
   }
 
+  List<Map<String, dynamic>> _messageReactionRows(
+    Map<String, dynamic> message,
+  ) {
+    final raw = message['reactions'];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList();
+  }
+
+  void _applyLocalReaction(
+    int messageId,
+    String emoji, {
+    required bool added,
+    required bool fromMe,
+  }) {
+    final next = List<Map<String, dynamic>>.from(_messages);
+    final index = next.indexWhere((m) => _asInt(m['id']) == messageId);
+    if (index < 0) return;
+
+    final message = Map<String, dynamic>.from(next[index]);
+    final reactions = _messageReactionRows(message);
+    final existingIndex = reactions.indexWhere(
+      (row) => row['emoji']?.toString() == emoji,
+    );
+
+    if (added) {
+      if (existingIndex >= 0) {
+        final row = Map<String, dynamic>.from(reactions[existingIndex]);
+        row['count'] = (_asInt(row['count']) ?? 0) + 1;
+        if (fromMe) row['reacted_by_me'] = true;
+        reactions[existingIndex] = row;
+      } else {
+        reactions.add({'emoji': emoji, 'count': 1, 'reacted_by_me': fromMe});
+      }
+    } else if (existingIndex >= 0) {
+      final row = Map<String, dynamic>.from(reactions[existingIndex]);
+      final nextCount = (_asInt(row['count']) ?? 1) - 1;
+      if (fromMe) {
+        row['reacted_by_me'] = false;
+      }
+      if (nextCount <= 0) {
+        reactions.removeAt(existingIndex);
+      } else {
+        row['count'] = nextCount;
+        reactions[existingIndex] = row;
+      }
+    }
+
+    message['reactions'] = reactions;
+    next[index] = message;
+    if (mounted) {
+      setState(() => _messages = next);
+    }
+  }
+
   void _scheduleChatsRefresh() {
     _chatsRefreshTimer?.cancel();
     _chatsRefreshTimer = Timer(const Duration(milliseconds: 500), () {
@@ -1534,6 +1654,48 @@ class _ChatsPageState extends State<ChatsPage> {
       if (!mounted || _activeChatId != chatId) return;
       _loadMessages(chatId, silent: true);
     });
+  }
+
+  void _sendRealtimeTyping(int chatId, bool isTyping) {
+    final channel = _chatChannels[chatId];
+    if (channel == null) return;
+    try {
+      channel.sink.add(jsonEncode({'type': 'typing', 'is_typing': isTyping}));
+    } catch (_) {
+      // Ignore typing send failures.
+    }
+  }
+
+  void _onComposerChanged(String value) {
+    final chatId = _activeChatId;
+    if (chatId == null) return;
+    final hasText = value.trim().isNotEmpty;
+    _typingStopTimer?.cancel();
+    _sendRealtimeTyping(chatId, hasText);
+    if (hasText) {
+      _typingStopTimer = Timer(const Duration(seconds: 2), () {
+        _sendRealtimeTyping(chatId, false);
+      });
+    }
+  }
+
+  void _setTypingUser(int userId, bool isTyping) {
+    if (isTyping) {
+      _typingUsers[userId] = DateTime.now();
+      return;
+    }
+    _typingUsers.remove(userId);
+  }
+
+  void _purgeStaleTyping() {
+    final now = DateTime.now();
+    final stale = _typingUsers.entries
+        .where((entry) => now.difference(entry.value).inSeconds > 4)
+        .map((entry) => entry.key)
+        .toList();
+    for (final userId in stale) {
+      _typingUsers.remove(userId);
+    }
   }
 
   void _handleRealtimeEvent(int socketChatId, dynamic rawEvent) {
@@ -1562,6 +1724,34 @@ class _ChatsPageState extends State<ChatsPage> {
           setState(() => _realtimeEnabled = true);
         }
         break;
+      case 'presence':
+        if (eventChatId != _activeChatId) break;
+        final userId = _asInt(data['user_id']);
+        final status = data['status']?.toString() ?? 'offline';
+        if (userId != null && userId != widget.currentUserId) {
+          if (status == 'online') {
+            _onlineUsers.add(userId);
+          } else {
+            _onlineUsers.remove(userId);
+            _typingUsers.remove(userId);
+          }
+          if (eventChatId == _activeChatId && mounted) {
+            setState(() {});
+          }
+        }
+        break;
+      case 'typing':
+        if (eventChatId != _activeChatId) break;
+        final userId = _asInt(data['user_id']);
+        final isTyping = data['is_typing'] == true;
+        if (userId != null && userId != widget.currentUserId) {
+          _setTypingUser(userId, isTyping);
+          _purgeStaleTyping();
+          if (eventChatId == _activeChatId && mounted) {
+            setState(() {});
+          }
+        }
+        break;
       case 'message':
       case 'message_updated':
         final messageRaw = data['message'];
@@ -1579,6 +1769,23 @@ class _ChatsPageState extends State<ChatsPage> {
           _removeMessage(messageId);
         }
         _scheduleChatsRefresh();
+        break;
+      case 'reaction_added':
+      case 'reaction_removed':
+        final messageId = _asInt(data['message_id']);
+        final userId = _asInt(data['user_id']);
+        final emoji = data['emoji']?.toString();
+        if (messageId != null && emoji != null && emoji.isNotEmpty) {
+          final added = eventType == 'reaction_added';
+          _applyLocalReaction(
+            messageId,
+            emoji,
+            added: added,
+            fromMe: userId == widget.currentUserId,
+          );
+          _scheduleActiveThreadSync(eventChatId);
+          _scheduleChatsRefresh();
+        }
         break;
       default:
         break;
@@ -1674,14 +1881,68 @@ class _ChatsPageState extends State<ChatsPage> {
 
   Future<void> _loadMessages(int chatId, {bool silent = false}) async {
     try {
-      final messages = await widget.api.messages(chatId);
+      final page = await widget.api.messagesCursor(chatId, limit: 40);
+      final items = (page['items'] as List? ?? const [])
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+      items.sort(
+        (a, b) => (_asInt(a['id']) ?? 0).compareTo(_asInt(b['id']) ?? 0),
+      );
+      final previousChatId = _activeChatId;
+      final switchingChat = _activeChatId != chatId;
+      if (switchingChat && previousChatId != null) {
+        _sendRealtimeTyping(previousChatId, false);
+      }
       setState(() {
         _activeChatId = chatId;
-        _messages = messages;
+        _messages = items;
+        _messagesNextBeforeId = _asInt(page['next_before_id']);
+        if (switchingChat) {
+          _typingUsers.clear();
+          _onlineUsers.clear();
+        }
       });
     } catch (error) {
       if (!silent) {
         _show(error);
+      }
+    }
+  }
+
+  Future<void> _loadOlderMessages() async {
+    final chatId = _activeChatId;
+    final beforeId = _messagesNextBeforeId;
+    if (chatId == null || beforeId == null || _loadingOlderMessages) return;
+
+    setState(() => _loadingOlderMessages = true);
+    try {
+      final page = await widget.api.messagesCursor(
+        chatId,
+        limit: 40,
+        beforeId: beforeId,
+      );
+      final older = (page['items'] as List? ?? const [])
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+      final merged = [...older, ..._messages];
+      final byId = <int, Map<String, dynamic>>{};
+      for (final row in merged) {
+        final id = _asInt(row['id']);
+        if (id != null) byId[id] = row;
+      }
+      final sorted = byId.values.toList()
+        ..sort(
+          (a, b) => (_asInt(a['id']) ?? 0).compareTo(_asInt(b['id']) ?? 0),
+        );
+      setState(() {
+        _messages = sorted;
+        _messagesNextBeforeId = _asInt(page['next_before_id']);
+      });
+    } catch (error) {
+      _show(error);
+    } finally {
+      if (mounted) {
+        setState(() => _loadingOlderMessages = false);
       }
     }
   }
@@ -1741,6 +2002,8 @@ class _ChatsPageState extends State<ChatsPage> {
     try {
       final sent = await widget.api.sendMessage(chatId, content);
       _messageController.clear();
+      _typingStopTimer?.cancel();
+      _sendRealtimeTyping(chatId, false);
       _upsertMessage(sent);
       _scheduleChatsRefresh();
     } catch (error) {
@@ -1754,6 +2017,188 @@ class _ChatsPageState extends State<ChatsPage> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String? _typingBannerText() {
+    _purgeStaleTyping();
+    if (_typingUsers.isEmpty) return null;
+    if (_typingUsers.length == 1) {
+      final userId = _typingUsers.keys.first;
+      return 'User $userId is typing...';
+    }
+    return '${_typingUsers.length} users are typing...';
+  }
+
+  Future<void> _toggleMessageReaction(
+    Map<String, dynamic> message,
+    String emoji,
+  ) async {
+    final messageId = _asInt(message['id']);
+    if (messageId == null) return;
+
+    final reactions = _messageReactionRows(message);
+    final existing = reactions.cast<Map<String, dynamic>?>().firstWhere(
+      (entry) => entry?['emoji']?.toString() == emoji,
+      orElse: () => null,
+    );
+    final reactedByMe = existing?['reacted_by_me'] == true;
+
+    try {
+      if (reactedByMe) {
+        await widget.api.removeMessageReaction(messageId, emoji);
+        _applyLocalReaction(messageId, emoji, added: false, fromMe: true);
+      } else {
+        await widget.api.addMessageReaction(messageId, emoji);
+        _applyLocalReaction(messageId, emoji, added: true, fromMe: true);
+      }
+      _scheduleChatsRefresh();
+    } catch (error) {
+      _show(error);
+    }
+  }
+
+  Future<void> _editMessage(Map<String, dynamic> message) async {
+    final messageId = _asInt(message['id']);
+    if (messageId == null) return;
+    final controller = TextEditingController(
+      text: message['content']?.toString() ?? '',
+    );
+    final updated = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Edit message'),
+          content: TextField(
+            controller: controller,
+            minLines: 1,
+            maxLines: 6,
+            decoration: const InputDecoration(hintText: 'Message text'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (updated == null || updated.isEmpty) return;
+    try {
+      final response = await widget.api.updateMessage(messageId, updated);
+      _upsertMessage(response);
+      _scheduleChatsRefresh();
+    } catch (error) {
+      _show(error);
+    }
+  }
+
+  Future<void> _deleteMessage(Map<String, dynamic> message) async {
+    final messageId = _asInt(message['id']);
+    if (messageId == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Delete message?'),
+          content: const Text('This action cannot be undone.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+
+    try {
+      final response = await widget.api.deleteMessage(messageId);
+      if (response['removed'] == true) {
+        _removeMessage(messageId);
+        _scheduleChatsRefresh();
+      }
+    } catch (error) {
+      _show(error);
+    }
+  }
+
+  Future<void> _openMessageActions(Map<String, dynamic> message) async {
+    final senderId = _asInt(message['sender_id']);
+    final isOwn =
+        widget.currentUserId != null && senderId == widget.currentUserId;
+    final reactions = _messageReactionRows(message);
+    final quickEmojis = ['👍', '🔥', '❤️', '😂', '👏'];
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (isOwn)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.edit_outlined),
+                    title: const Text('Edit'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _editMessage(message);
+                    },
+                  ),
+                if (isOwn)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.delete_outline_rounded),
+                    title: const Text('Delete'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _deleteMessage(message);
+                    },
+                  ),
+                if (isOwn) const SizedBox(height: 6),
+                const Text('Quick reaction'),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: quickEmojis.map((emoji) {
+                    final reacted = reactions.any(
+                      (row) =>
+                          row['emoji']?.toString() == emoji &&
+                          row['reacted_by_me'] == true,
+                    );
+                    return ChoiceChip(
+                      selected: reacted,
+                      label: Text(emoji),
+                      onSelected: (_) {
+                        Navigator.pop(context);
+                        _toggleMessageReaction(message, emoji);
+                      },
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   List<Map<String, dynamic>> get _visibleChats {
@@ -2005,8 +2450,31 @@ class _ChatsPageState extends State<ChatsPage> {
 
   Widget _buildThread(BuildContext context) {
     final theme = Theme.of(context);
+    final typingBanner = _typingBannerText();
+    final onlineCount = _onlineUsers.length;
+    final hasOlder = _messagesNextBeforeId != null;
     return Column(
       children: [
+        if (_activeChatId != null)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0F6F9),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFDCE8ED)),
+            ),
+            child: Text(
+              typingBanner ??
+                  (onlineCount > 0
+                      ? '$onlineCount online in this chat'
+                      : 'Realtime connected'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
         Expanded(
           child: _activeChatId == null
               ? Center(
@@ -2028,9 +2496,33 @@ class _ChatsPageState extends State<ChatsPage> {
                 )
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 8),
-                  itemCount: _messages.length,
+                  itemCount: _messages.length + (hasOlder ? 1 : 0),
                   itemBuilder: (context, index) {
-                    final msg = _messages[index];
+                    if (hasOlder && index == 0) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Center(
+                          child: OutlinedButton.icon(
+                            onPressed: _loadingOlderMessages
+                                ? null
+                                : _loadOlderMessages,
+                            icon: _loadingOlderMessages
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.expand_less_rounded),
+                            label: const Text('Load older messages'),
+                          ),
+                        ),
+                      );
+                    }
+
+                    final messageIndex = hasOlder ? index - 1 : index;
+                    final msg = _messages[messageIndex];
                     final content = msg['content']?.toString() ?? '';
                     final senderId = _asInt(msg['sender_id']);
                     final status = msg['status']?.toString() ?? '';
@@ -2051,36 +2543,92 @@ class _ChatsPageState extends State<ChatsPage> {
                           : Alignment.centerLeft,
                       child: ConstrainedBox(
                         constraints: const BoxConstraints(maxWidth: 430),
-                        child: Container(
-                          margin: EdgeInsets.only(
-                            bottom: 8,
-                            left: isOwn ? 34 : 0,
-                            right: isOwn ? 0 : 34,
-                          ),
-                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-                          decoration: BoxDecoration(
-                            color: isOwn
-                                ? const Color(0xFFDDF0FA)
-                                : const Color(0xFFF6FAFC),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: isOwn
-                                  ? const Color(0xFFC3DFED)
-                                  : const Color(0xFFE0EBEF),
+                        child: InkWell(
+                          onLongPress: () => _openMessageActions(msg),
+                          borderRadius: BorderRadius.circular(14),
+                          child: Container(
+                            margin: EdgeInsets.only(
+                              bottom: 8,
+                              left: isOwn ? 34 : 0,
+                              right: isOwn ? 0 : 34,
                             ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(content),
-                              const SizedBox(height: 4),
-                              Text(
-                                meta.join(' | '),
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
+                            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                            decoration: BoxDecoration(
+                              color: isOwn
+                                  ? const Color(0xFFDDF0FA)
+                                  : const Color(0xFFF6FAFC),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: isOwn
+                                    ? const Color(0xFFC3DFED)
+                                    : const Color(0xFFE0EBEF),
                               ),
-                            ],
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(content),
+                                ...() {
+                                  final reactions = _messageReactionRows(msg);
+                                  if (reactions.isEmpty) {
+                                    return const <Widget>[];
+                                  }
+                                  return [
+                                    const SizedBox(height: 6),
+                                    Wrap(
+                                      spacing: 6,
+                                      runSpacing: 6,
+                                      children: reactions.map((reaction) {
+                                        final emoji =
+                                            reaction['emoji']?.toString() ?? '';
+                                        final count =
+                                            _asInt(reaction['count']) ?? 0;
+                                        final reactedByMe =
+                                            reaction['reacted_by_me'] == true;
+                                        return InkWell(
+                                          onTap: () => _toggleMessageReaction(
+                                            msg,
+                                            emoji,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            999,
+                                          ),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: reactedByMe
+                                                  ? const Color(0xFFD6EBF7)
+                                                  : const Color(0xFFEFF5F8),
+                                              borderRadius:
+                                                  BorderRadius.circular(999),
+                                              border: Border.all(
+                                                color: reactedByMe
+                                                    ? const Color(0xFFAED4EB)
+                                                    : const Color(0xFFD7E4EA),
+                                              ),
+                                            ),
+                                            child: Text(
+                                              '$emoji $count',
+                                              style: theme.textTheme.bodySmall,
+                                            ),
+                                          ),
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ];
+                                }(),
+                                const SizedBox(height: 4),
+                                Text(
+                                  meta.join(' | '),
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -2100,6 +2648,8 @@ class _ChatsPageState extends State<ChatsPage> {
               Expanded(
                 child: TextField(
                   controller: _messageController,
+                  enabled: _activeChatId != null,
+                  onChanged: _onComposerChanged,
                   onSubmitted: (_) => _sendMessage(),
                   minLines: 1,
                   maxLines: 4,
@@ -2111,7 +2661,7 @@ class _ChatsPageState extends State<ChatsPage> {
               ),
               const SizedBox(width: 8),
               FilledButton(
-                onPressed: _sendMessage,
+                onPressed: _activeChatId == null ? null : _sendMessage,
                 style: FilledButton.styleFrom(
                   shape: const CircleBorder(),
                   padding: const EdgeInsets.all(14),

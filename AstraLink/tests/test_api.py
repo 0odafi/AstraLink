@@ -1,4 +1,4 @@
-def _register(client, username: str, email: str, password: str = "Password123"):
+﻿def _register(client, username: str, email: str, password: str = "Password123"):
     response = client.post(
         "/api/auth/register",
         json={"username": username, "email": email, "password": password},
@@ -54,9 +54,15 @@ def test_auth_profile_chat_social_customization_flow(client):
     message_reaction = client.post(
         f"/api/chats/messages/{message_id}/reactions",
         headers=bob_headers,
-        json={"emoji": "🔥"},
+        json={"emoji": "fire"},
     )
     assert message_reaction.status_code == 201
+    assert message_reaction.json()["chat_id"] == chat_id
+
+    alice_messages_after_reaction = client.get(f"/api/chats/{chat_id}/messages", headers=alice_headers)
+    assert alice_messages_after_reaction.status_code == 200
+    reaction_rows = alice_messages_after_reaction.json()[-1]["reactions"]
+    assert any(row["emoji"] == "fire" and row["count"] >= 1 for row in reaction_rows)
 
     follow = client.post(f"/api/users/{alice['user']['id']}/follow", headers=bob_headers)
     assert follow.status_code == 200
@@ -194,6 +200,26 @@ def test_phase1_message_lifecycle_cursor_and_statuses(client):
     all_messages = client.get(f"/api/chats/{chat_id}/messages", headers=alice_headers)
     assert all_messages.status_code == 200, all_messages.text
     by_id = {row["id"]: row for row in all_messages.json()}
+
+    reaction_added = client.post(
+        f"/api/chats/messages/{third_id}/reactions",
+        headers=bob_headers,
+        json={"emoji": "thumbsup"},
+    )
+    assert reaction_added.status_code == 201, reaction_added.text
+
+    message_with_reaction = client.get(f"/api/chats/{chat_id}/messages", headers=alice_headers)
+    assert message_with_reaction.status_code == 200, message_with_reaction.text
+    by_id_with_reaction = {row["id"]: row for row in message_with_reaction.json()}
+    assert any(row["emoji"] == "thumbsup" for row in by_id_with_reaction[third_id]["reactions"])
+
+    reaction_removed = client.delete(
+        f"/api/chats/messages/{third_id}/reactions",
+        headers=bob_headers,
+        params={"emoji": "thumbsup"},
+    )
+    assert reaction_removed.status_code == 200, reaction_removed.text
+    assert reaction_removed.json()["removed"] is True
     assert by_id[third_id]["is_pinned"] is True
 
     deleted = client.delete(f"/api/chats/messages/{second_id}", headers=alice_headers)

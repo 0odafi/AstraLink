@@ -39,6 +39,12 @@ class MessageCreate(BaseModel):
     forward_from_message_id: int | None = None
 
 
+class MessageReactionSummary(BaseModel):
+    emoji: str
+    count: int
+    reacted_by_me: bool = False
+
+
 class MessageOut(BaseModel):
     id: int
     chat_id: int
@@ -50,6 +56,7 @@ class MessageOut(BaseModel):
     reply_to_message_id: int | None = None
     forwarded_from_message_id: int | None = None
     is_pinned: bool = False
+    reactions: list[MessageReactionSummary] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
