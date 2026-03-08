@@ -31,7 +31,9 @@ lib/src/
 - Shared UI primitives are in `core/ui`.
 - Offline cache is enabled for dialogs and message timelines via
   `features/chats/data/chats_local_cache.dart` (`SharedPreferences`).
+- Chats/messages state is managed with `Riverpod` view-models in
+  `features/chats/application/chat_view_models.dart`.
 
 ## Next step
 
-- Move business logic from widgets into feature controllers (`Cubit`/`Riverpod`) for cleaner state flow and easier testing.
+- Move auth/settings/profile state to providers and add integration tests for view-models.

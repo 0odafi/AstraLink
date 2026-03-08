@@ -1,14 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
 import '../../../models.dart';
 import '../../../realtime.dart';
-import '../data/chats_local_cache.dart';
+import '../application/chat_view_models.dart';
 
-class ChatsTab extends StatefulWidget {
+class ChatsTab extends ConsumerStatefulWidget {
   final AstraApi api;
   final AuthTokens? Function() getTokens;
   final AppUser me;
@@ -21,17 +22,12 @@ class ChatsTab extends StatefulWidget {
   });
 
   @override
-  State<ChatsTab> createState() => _ChatsTabState();
+  ConsumerState<ChatsTab> createState() => _ChatsTabState();
 }
 
-class _ChatsTabState extends State<ChatsTab> {
-  final ChatsLocalCache _cache = ChatsLocalCache();
+class _ChatsTabState extends ConsumerState<ChatsTab> {
   final _searchController = TextEditingController();
-  bool _loading = true;
-  List<ChatItem> _all = const [];
-  bool _searchingMessages = false;
-  List<MessageSearchHit> _messageHits = const [];
-  String _activeFilter = 'all';
+  late ChatListVmArgs _args;
   RealtimeMeSocket? _realtime;
   Timer? _refreshDebounce;
   bool _socketConnected = false;
@@ -39,8 +35,28 @@ class _ChatsTabState extends State<ChatsTab> {
   @override
   void initState() {
     super.initState();
-    unawaited(_primeChats());
+    _args = ChatListVmArgs(
+      api: widget.api,
+      getTokens: widget.getTokens,
+      me: widget.me,
+    );
+    unawaited(ref.read(chatListViewModelProvider(_args)).prime());
     _startRealtime();
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatsTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.api.baseUrl != widget.api.baseUrl ||
+        oldWidget.me.id != widget.me.id) {
+      _args = ChatListVmArgs(
+        api: widget.api,
+        getTokens: widget.getTokens,
+        me: widget.me,
+      );
+      unawaited(ref.read(chatListViewModelProvider(_args)).prime());
+      _startRealtime();
+    }
   }
 
   @override
@@ -100,50 +116,12 @@ class _ChatsTabState extends State<ChatsTab> {
     });
   }
 
-  Future<void> _primeChats() async {
-    await _loadCachedChats();
-    await _loadChats();
-  }
-
-  Future<void> _loadCachedChats() async {
-    final cached = await _cache.loadChats(
-      baseUrl: widget.api.baseUrl,
-      userId: widget.me.id,
-    );
-    if (!mounted || cached.isEmpty) return;
-    setState(() {
-      _all = cached;
-      _loading = false;
-    });
-  }
-
   Future<void> _loadChats({bool silent = false}) async {
-    final tokens = widget.getTokens();
-    if (tokens == null) return;
-    if (mounted && !silent && _all.isEmpty) setState(() => _loading = true);
-    try {
-      final chats = await widget.api.listChats(
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        includeArchived: true,
-      );
-      if (!mounted) return;
-      setState(() {
-        _all = chats;
-      });
-      unawaited(
-        _cache.saveChats(
-          baseUrl: widget.api.baseUrl,
-          userId: widget.me.id,
-          chats: chats,
-        ),
-      );
-    } catch (error) {
-      if (!silent && _all.isEmpty) {
-        _showSnack(error.toString());
-      }
-    } finally {
-      if (mounted && !silent) setState(() => _loading = false);
+    final error = await ref
+        .read(chatListViewModelProvider(_args))
+        .loadChats(silent: silent);
+    if (error != null && !silent) {
+      _showSnack(error);
     }
   }
 
@@ -154,47 +132,12 @@ class _ChatsTabState extends State<ChatsTab> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  List<ChatItem> get _filtered {
-    final scoped = switch (_activeFilter) {
-      'pinned' => _all.where((chat) => chat.isPinned).toList(),
-      'archived' => _all.where((chat) => chat.isArchived).toList(),
-      _ => _all.where((chat) => !chat.isArchived).toList(),
-    };
-    final q = _searchController.text.trim().toLowerCase();
-    if (q.isEmpty) return scoped;
-    return scoped.where((chat) {
-      return chat.title.toLowerCase().contains(q) ||
-          (chat.lastMessagePreview ?? '').toLowerCase().contains(q);
-    }).toList();
-  }
-
   Future<void> _searchInMessages() async {
-    final query = _searchController.text.trim();
-    if (query.length < 2) {
-      setState(() {
-        _messageHits = const [];
-      });
-      return;
-    }
-
-    final tokens = widget.getTokens();
-    if (tokens == null) return;
-
-    setState(() => _searchingMessages = true);
-    try {
-      final hits = await widget.api.searchMessages(
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        query: query,
-      );
-      if (!mounted) return;
-      setState(() {
-        _messageHits = hits;
-      });
-    } catch (error) {
-      _showSnack(error.toString());
-    } finally {
-      if (mounted) setState(() => _searchingMessages = false);
+    final error = await ref
+        .read(chatListViewModelProvider(_args))
+        .searchInMessages(_searchController.text);
+    if (error != null) {
+      _showSnack(error);
     }
   }
 
@@ -317,8 +260,9 @@ class _ChatsTabState extends State<ChatsTab> {
 
   @override
   Widget build(BuildContext context) {
-    final items = _filtered;
-    final showMessageHits = _messageHits.isNotEmpty;
+    final vm = ref.watch(chatListViewModelProvider(_args));
+    final items = vm.filteredChats(_searchController.text);
+    final showMessageHits = vm.messageHits.isNotEmpty;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Chats'),
@@ -353,10 +297,8 @@ class _ChatsTabState extends State<ChatsTab> {
               ),
               onChanged: (_) {
                 if (_searchController.text.trim().isEmpty &&
-                    _messageHits.isNotEmpty) {
-                  setState(() {
-                    _messageHits = const [];
-                  });
+                    vm.messageHits.isNotEmpty) {
+                  ref.read(chatListViewModelProvider(_args)).clearMessageHits();
                 } else {
                   setState(() {});
                 }
@@ -367,38 +309,42 @@ class _ChatsTabState extends State<ChatsTab> {
               children: [
                 FilterChip(
                   label: const Text('All'),
-                  selected: _activeFilter == 'all',
+                  selected: vm.activeFilter == 'all',
                   onSelected: (_) {
-                    if (_activeFilter == 'all') return;
-                    setState(() => _activeFilter = 'all');
+                    if (vm.activeFilter == 'all') return;
+                    ref.read(chatListViewModelProvider(_args)).setFilter('all');
                     unawaited(_loadChats(silent: true));
                   },
                 ),
                 SizedBox(width: context.sp(8)),
                 FilterChip(
                   label: const Text('Pinned'),
-                  selected: _activeFilter == 'pinned',
+                  selected: vm.activeFilter == 'pinned',
                   onSelected: (_) {
-                    if (_activeFilter == 'pinned') return;
-                    setState(() => _activeFilter = 'pinned');
+                    if (vm.activeFilter == 'pinned') return;
+                    ref
+                        .read(chatListViewModelProvider(_args))
+                        .setFilter('pinned');
                     unawaited(_loadChats(silent: true));
                   },
                 ),
                 SizedBox(width: context.sp(8)),
                 FilterChip(
                   label: const Text('Archived'),
-                  selected: _activeFilter == 'archived',
+                  selected: vm.activeFilter == 'archived',
                   onSelected: (_) {
-                    if (_activeFilter == 'archived') return;
-                    setState(() => _activeFilter = 'archived');
+                    if (vm.activeFilter == 'archived') return;
+                    ref
+                        .read(chatListViewModelProvider(_args))
+                        .setFilter('archived');
                     unawaited(_loadChats(silent: true));
                   },
                 ),
                 const Spacer(),
                 IconButton(
                   tooltip: 'Search in messages',
-                  onPressed: _searchingMessages ? null : _searchInMessages,
-                  icon: _searchingMessages
+                  onPressed: vm.searchingMessages ? null : _searchInMessages,
+                  icon: vm.searchingMessages
                       ? SizedBox(
                           width: context.sp(16),
                           height: context.sp(16),
@@ -411,17 +357,17 @@ class _ChatsTabState extends State<ChatsTab> {
               ],
             ),
             Expanded(
-              child: _loading
+              child: vm.loading
                   ? const Center(child: CircularProgressIndicator())
                   : RefreshIndicator(
                       onRefresh: _loadChats,
                       child: showMessageHits
                           ? ListView.separated(
-                              itemCount: _messageHits.length,
+                              itemCount: vm.messageHits.length,
                               separatorBuilder: (_, index) =>
                                   SizedBox(height: context.sp(6)),
                               itemBuilder: (context, index) {
-                                final hit = _messageHits[index];
+                                final hit = vm.messageHits[index];
                                 return Card(
                                   child: ListTile(
                                     leading: const Icon(Icons.search_rounded),
@@ -578,7 +524,7 @@ class _ChatTile extends StatelessWidget {
   }
 }
 
-class ChatScreen extends StatefulWidget {
+class ChatScreen extends ConsumerStatefulWidget {
   final AstraApi api;
   final AuthTokens? Function() getTokens;
   final ChatItem chat;
@@ -593,20 +539,16 @@ class ChatScreen extends StatefulWidget {
   });
 
   @override
-  State<ChatScreen> createState() => _ChatScreenState();
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
-  final ChatsLocalCache _cache = ChatsLocalCache();
+class _ChatScreenState extends ConsumerState<ChatScreen> {
+  late ChatThreadVmArgs _threadArgs;
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
 
-  bool _loading = true;
-  bool _sending = false;
-  List<MessageItem> _messages = const [];
   RealtimeMeSocket? _realtime;
   Timer? _typingPauseTimer;
-  Timer? _cachePersistDebounce;
   bool _typingSent = false;
   bool _socketConnected = false;
   final Set<int> _typingUserIds = <int>{};
@@ -614,82 +556,49 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    unawaited(_primeMessages());
+    _threadArgs = ChatThreadVmArgs(
+      api: widget.api,
+      getTokens: widget.getTokens,
+      me: widget.me,
+      chatId: widget.chat.id,
+    );
+    unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
     _startRealtime();
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.api.baseUrl != widget.api.baseUrl ||
+        oldWidget.me.id != widget.me.id ||
+        oldWidget.chat.id != widget.chat.id) {
+      _threadArgs = ChatThreadVmArgs(
+        api: widget.api,
+        getTokens: widget.getTokens,
+        me: widget.me,
+        chatId: widget.chat.id,
+      );
+      unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
+      _startRealtime();
+    }
   }
 
   @override
   void dispose() {
     _notifyTypingStopped();
     _typingPauseTimer?.cancel();
-    _cachePersistDebounce?.cancel();
     _realtime?.stop();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
-  Future<void> _primeMessages() async {
-    await _loadCachedMessages();
-    await _loadMessages();
+  List<MessageItem> get _messages {
+    return ref.read(chatThreadViewModelProvider(_threadArgs)).messages;
   }
 
-  Future<void> _loadCachedMessages() async {
-    final cached = await _cache.loadMessages(
-      baseUrl: widget.api.baseUrl,
-      userId: widget.me.id,
-      chatId: widget.chat.id,
-    );
-    if (!mounted || cached.isEmpty) return;
-    setState(() {
-      _messages = cached;
-      _loading = false;
-    });
-    _scrollToBottom();
-    _ackUnreadMessages();
-  }
-
-  Future<void> _loadMessages() async {
-    final tokens = widget.getTokens();
-    if (tokens == null) return;
-    if (mounted && _messages.isEmpty) setState(() => _loading = true);
-    try {
-      final rows = await widget.api.listMessages(
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        chatId: widget.chat.id,
-      );
-      rows.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-      if (!mounted) return;
-      setState(() {
-        _messages = rows;
-      });
-      _schedulePersistMessages();
-      _scrollToBottom();
-      _ackUnreadMessages();
-    } catch (error) {
-      if (_messages.isEmpty) {
-        _showSnack(error.toString());
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  void _schedulePersistMessages() {
-    _cachePersistDebounce?.cancel();
-    _cachePersistDebounce = Timer(const Duration(milliseconds: 300), () {
-      unawaited(_persistMessages());
-    });
-  }
-
-  Future<void> _persistMessages() async {
-    await _cache.saveMessages(
-      baseUrl: widget.api.baseUrl,
-      userId: widget.me.id,
-      chatId: widget.chat.id,
-      messages: _messages,
-    );
+  bool get _sending {
+    return ref.read(chatThreadViewModelProvider(_threadArgs)).sending;
   }
 
   String _buildRealtimeUrl() {
@@ -761,13 +670,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final message = map['message'];
       if (message is! Map) return;
       final item = MessageItem.fromJson(message.cast<String, dynamic>());
-      final hasExisting = _messages.any((row) => row.id == item.id);
-      if (hasExisting) return;
-      setState(() {
-        _messages = [..._messages, item]
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-      });
-      _schedulePersistMessages();
+      ref.read(chatThreadViewModelProvider(_threadArgs)).applyMessage(item);
       _scrollToBottom();
       _ackMessageRead(item);
       return;
@@ -779,12 +682,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final message = map['message'];
       if (message is! Map) return;
       final item = MessageItem.fromJson(message.cast<String, dynamic>());
-      setState(() {
-        _messages = _messages
-            .map((row) => row.id == item.id ? item : row)
-            .toList();
-      });
-      _schedulePersistMessages();
+      ref
+          .read(chatThreadViewModelProvider(_threadArgs))
+          .applyUpdatedMessage(item);
       return;
     }
 
@@ -793,10 +693,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final messageId = map['message_id'];
       if (chatId is! int || messageId is! int) return;
       if (chatId != widget.chat.id) return;
-      setState(() {
-        _messages = _messages.where((row) => row.id != messageId).toList();
-      });
-      _schedulePersistMessages();
+      ref
+          .read(chatThreadViewModelProvider(_threadArgs))
+          .deleteMessage(messageId);
       return;
     }
 
@@ -806,24 +705,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final senderStatus = map['sender_status']?.toString();
       if (chatId is! int || messageId is! int || senderStatus == null) return;
       if (chatId != widget.chat.id) return;
-      setState(() {
-        _messages = _messages
-            .map(
-              (row) => row.id == messageId
-                  ? MessageItem(
-                      id: row.id,
-                      chatId: row.chatId,
-                      senderId: row.senderId,
-                      content: row.content,
-                      createdAt: row.createdAt,
-                      status: senderStatus,
-                      editedAt: row.editedAt,
-                    )
-                  : row,
-            )
-            .toList();
-      });
-      _schedulePersistMessages();
+      ref
+          .read(chatThreadViewModelProvider(_threadArgs))
+          .updateMessageStatus(messageId, senderStatus);
     }
   }
 
@@ -881,33 +765,17 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty || _sending) return;
-    final tokens = widget.getTokens();
-    if (tokens == null) return;
-
-    setState(() => _sending = true);
-    try {
-      final sent = await widget.api.sendMessage(
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        chatId: widget.chat.id,
-        content: text,
-      );
+    final error = await ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .sendMessage(text);
+    if (error == null) {
       _messageController.clear();
       _notifyTypingStopped();
-      final hasExisting = _messages.any((row) => row.id == sent.id);
-      if (!hasExisting) {
-        setState(() {
-          _messages = [..._messages, sent]
-            ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-        });
-        _schedulePersistMessages();
-      }
       _scrollToBottom();
-    } catch (error) {
-      _showSnack(error.toString());
-    } finally {
-      if (mounted) setState(() => _sending = false);
+      if (mounted) setState(() {});
+      return;
     }
+    _showSnack(error);
   }
 
   void _scrollToBottom() {
@@ -930,6 +798,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final vm = ref.watch(chatThreadViewModelProvider(_threadArgs));
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.chat.title),
@@ -964,7 +833,7 @@ class _ChatScreenState extends State<ChatScreen> {
       body: Column(
         children: [
           Expanded(
-            child: _loading
+            child: vm.loading
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
                     controller: _scrollController,
@@ -972,9 +841,9 @@ class _ChatScreenState extends State<ChatScreen> {
                       horizontal: context.sp(12),
                       vertical: context.sp(10),
                     ),
-                    itemCount: _messages.length,
+                    itemCount: vm.messages.length,
                     itemBuilder: (context, index) {
-                      final message = _messages[index];
+                      final message = vm.messages[index];
                       final mine = message.senderId == widget.me.id;
                       return _MessageBubble(message: message, mine: mine);
                     },
@@ -1003,10 +872,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   SizedBox(width: context.sp(8)),
                   FilledButton(
                     onPressed:
-                        _messageController.text.trim().isNotEmpty && !_sending
+                        _messageController.text.trim().isNotEmpty && !vm.sending
                         ? _sendMessage
                         : null,
-                    child: _sending
+                    child: vm.sending
                         ? SizedBox(
                             width: context.sp(16),
                             height: context.sp(16),
