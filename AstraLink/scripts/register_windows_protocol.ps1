@@ -39,4 +39,4 @@ $commandPath = Join-Path $registryPath "shell\\open\\command"
 New-Item -Path $commandPath -Force | Out-Null
 Set-ItemProperty -Path $commandPath -Name "(default)" -Value "`"$resolvedExe`" `"%1`""
 
-Write-Output "Registered $Scheme:// protocol for $resolvedExe"
+Write-Output "Registered ${Scheme}:// protocol for $resolvedExe"
