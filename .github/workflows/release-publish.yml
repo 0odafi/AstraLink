@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.vars.outputs.version }}
+      build_name: ${{ steps.vars.outputs.build_name }}
+      build_number: ${{ steps.vars.outputs.build_number }}
       channel: ${{ steps.vars.outputs.channel }}
       mandatory: ${{ steps.vars.outputs.mandatory }}
       safe_version: ${{ steps.vars.outputs.safe_version }}
@@ -44,8 +46,17 @@ jobs:
             CHANNEL="stable"
             MANDATORY="false"
           fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$'; then
+            echo "Invalid version format: $VERSION" >&2
+            echo "Expected format: x.y.z+build" >&2
+            exit 1
+          fi
+          BUILD_NAME="${VERSION%%+*}"
+          BUILD_NUMBER="${VERSION##*+}"
           SAFE_VERSION="${VERSION//+/_}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_name=$BUILD_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "mandatory=$MANDATORY" >> "$GITHUB_OUTPUT"
           echo "safe_version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
@@ -62,7 +73,7 @@ jobs:
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
       - run: flutter pub get
-      - run: flutter build windows --release
+      - run: flutter build windows --release --build-name="${{ needs.resolve.outputs.build_name }}" --build-number="${{ needs.resolve.outputs.build_number }}"
       - shell: pwsh
         run: |
           $version = "${{ needs.resolve.outputs.version }}"
@@ -93,8 +104,8 @@ jobs:
       - run: java -version
       - run: flutter doctor -v
       - run: flutter pub get
-      - run: flutter build apk --release --verbose
-      - run: flutter build appbundle --release --verbose
+      - run: flutter build apk --release --build-name="${{ needs.resolve.outputs.build_name }}" --build-number="${{ needs.resolve.outputs.build_number }}" --verbose
+      - run: flutter build appbundle --release --build-name="${{ needs.resolve.outputs.build_name }}" --build-number="${{ needs.resolve.outputs.build_number }}" --verbose
       - name: Prepare Android artifacts
         run: |
           mkdir -p ../release_android

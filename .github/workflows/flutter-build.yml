@@ -2,12 +2,46 @@ name: Flutter Build
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "App version (e.g. 1.0.1+2)"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      build_name: ${{ steps.vars.outputs.build_name }}
+      build_number: ${{ steps.vars.outputs.build_number }}
+      safe_version: ${{ steps.vars.outputs.safe_version }}
+    steps:
+      - id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$'; then
+            echo "Invalid version format: $VERSION" >&2
+            echo "Expected format: x.y.z+build" >&2
+            exit 1
+          fi
+          BUILD_NAME="${VERSION%%+*}"
+          BUILD_NUMBER="${VERSION##*+}"
+          SAFE_VERSION="${VERSION//+/_}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_name=$BUILD_NAME" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "safe_version=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
+
   windows:
+    needs: resolve
     runs-on: windows-latest
     defaults:
       run:
@@ -18,13 +52,14 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
-      - run: flutter build windows --release
+      - run: flutter build windows --release --build-name="${{ needs.resolve.outputs.build_name }}" --build-number="${{ needs.resolve.outputs.build_number }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: astralink-windows-release
+          name: astralink-windows-release-${{ needs.resolve.outputs.safe_version }}
           path: AstraLink/astralink_app/build/windows/x64/runner/Release
 
   android:
+    needs: resolve
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -43,8 +78,8 @@ jobs:
       - run: java -version
       - run: flutter doctor -v
       - run: flutter pub get
-      - run: flutter build apk --release --verbose
+      - run: flutter build apk --release --build-name="${{ needs.resolve.outputs.build_name }}" --build-number="${{ needs.resolve.outputs.build_number }}" --verbose
       - uses: actions/upload-artifact@v4
         with:
-          name: astralink-android-apk
+          name: astralink-android-apk-${{ needs.resolve.outputs.safe_version }}
           path: AstraLink/astralink_app/build/app/outputs/flutter-apk/app-release.apk
