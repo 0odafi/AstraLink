@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24 * 7
     refresh_token_expire_days: int = 90
     database_url: str = "sqlite:///./astralink.db"
+    database_auto_migrate: bool = True
     cors_origins: str = "*"
     release_manifest_path: str = "./releases/manifest.json"
     media_root: str = "./media"
@@ -33,6 +34,8 @@ class Settings(BaseSettings):
     twilio_auth_token: str | None = None
     twilio_from: str | None = None
     twilio_messaging_service_sid: str | None = None
+    redis_url: str | None = None
+    redis_channel_prefix: str = "astralink"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

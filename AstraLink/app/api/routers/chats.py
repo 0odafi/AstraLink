@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.models.chat import Message
 from app.models.user import User
-from app.realtime.manager import chat_manager, user_realtime_manager
+from app.realtime.fanout import realtime_fanout
 from app.schemas.chat import (
     ChatCreate,
     ChatMemberAdd,
@@ -43,8 +43,11 @@ router = APIRouter(prefix="/chats", tags=["Chats"])
 
 
 async def _broadcast_chat_event(db: Session, chat_id: int, payload: dict) -> None:
-    await chat_manager.broadcast(chat_id, payload)
-    await user_realtime_manager.broadcast_many(chat_member_ids(db, chat_id), payload)
+    await realtime_fanout.broadcast_chat_event(
+        chat_id=chat_id,
+        member_ids=chat_member_ids(db, chat_id),
+        payload=payload,
+    )
 
 
 @router.post("", response_model=ChatOut, status_code=status.HTTP_201_CREATED)
@@ -121,7 +124,10 @@ async def patch_chat_state(
         "is_pinned": membership.is_pinned,
         "folder": membership.folder,
     }
-    await user_realtime_manager.broadcast(current_user.id, state_payload)
+    await realtime_fanout.broadcast_user_event(
+        user_id=current_user.id,
+        payload=state_payload,
+    )
     return ChatStateOut(
         chat_id=chat_id,
         is_archived=membership.is_archived,

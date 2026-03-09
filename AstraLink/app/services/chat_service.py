@@ -1,8 +1,8 @@
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, desc, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, case, desc, func, literal, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from app.core.config import get_settings
 from app.models.chat import (
@@ -65,18 +65,20 @@ def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
 
 
 def _find_private_chat_between(db: Session, owner_id: int, peer_id: int) -> Chat | None:
-    owner_private_chats = list(
-        db.scalars(
-            select(Chat)
-            .join(ChatMember, ChatMember.chat_id == Chat.id)
-            .where(and_(Chat.type == ChatType.PRIVATE, ChatMember.user_id == owner_id))
-        ).all()
+    owner_membership = aliased(ChatMember)
+    peer_membership = aliased(ChatMember)
+    return db.scalar(
+        select(Chat)
+        .join(owner_membership, owner_membership.chat_id == Chat.id)
+        .join(peer_membership, peer_membership.chat_id == Chat.id)
+        .where(
+            and_(
+                Chat.type == ChatType.PRIVATE,
+                owner_membership.user_id == owner_id,
+                peer_membership.user_id == peer_id,
+            )
+        )
     )
-    for chat in owner_private_chats:
-        members = set(db.scalars(select(ChatMember.user_id).where(ChatMember.chat_id == chat.id)).all())
-        if members == {owner_id, peer_id}:
-            return chat
-    return None
 
 
 def create_or_get_private_chat(db: Session, owner_id: int, query: str) -> Chat:
@@ -93,14 +95,22 @@ def create_or_get_private_chat(db: Session, owner_id: int, query: str) -> Chat:
 
 
 def _private_chat_display_name(db: Session, chat_id: int, user_id: int, fallback: str) -> str:
-    member_ids = list(db.scalars(select(ChatMember.user_id).where(ChatMember.chat_id == chat_id)).all())
-    peer_id = next((member_id for member_id in member_ids if member_id != user_id), None)
-    if peer_id is None:
-        return fallback
-    peer_user = db.scalar(select(User).where(User.id == peer_id))
+    peer_user = db.scalar(
+        select(User)
+        .join(ChatMember, ChatMember.user_id == User.id)
+        .where(
+            and_(
+                ChatMember.chat_id == chat_id,
+                ChatMember.user_id != user_id,
+            )
+        )
+        .limit(1)
+    )
     if peer_user is None:
         return fallback
-    peer_name = " ".join(part for part in [peer_user.first_name, peer_user.last_name] if part).strip()
+    peer_name = " ".join(
+        part for part in [peer_user.first_name, peer_user.last_name] if part
+    ).strip()
     return peer_name or peer_user.username or fallback
 
 
@@ -112,70 +122,152 @@ def get_user_chats(
     archived_only: bool = False,
     pinned_only: bool = False,
     folder: str | None = None,
-) -> list[Chat]:
-    statement = (
-        select(Chat, ChatMember)
-        .join(ChatMember, ChatMember.chat_id == Chat.id)
+) -> list[dict]:
+    membership_sq = (
+        select(
+            ChatMember.chat_id.label("chat_id"),
+            ChatMember.is_archived.label("is_archived"),
+            ChatMember.is_pinned.label("is_pinned"),
+            ChatMember.folder.label("folder"),
+        )
         .where(ChatMember.user_id == user_id)
+        .subquery()
+    )
+
+    last_message_id_sq = (
+        select(
+            Message.chat_id.label("chat_id"),
+            func.max(Message.id).label("last_message_id"),
+        )
+        .group_by(Message.chat_id)
+        .subquery()
+    )
+    last_message_sq = (
+        select(
+            Message.chat_id.label("chat_id"),
+            Message.content.label("last_message_preview"),
+            Message.created_at.label("last_message_at"),
+        )
+        .join(last_message_id_sq, Message.id == last_message_id_sq.c.last_message_id)
+        .subquery()
+    )
+
+    unread_sq = (
+        select(
+            Message.chat_id.label("chat_id"),
+            func.count(Message.id).label("unread_count"),
+        )
+        .outerjoin(
+            MessageDelivery,
+            and_(
+                MessageDelivery.message_id == Message.id,
+                MessageDelivery.user_id == user_id,
+            ),
+        )
+        .where(
+            and_(
+                Message.sender_id != user_id,
+                or_(
+                    MessageDelivery.id.is_(None),
+                    MessageDelivery.status != MessageDeliveryStatus.READ,
+                ),
+            )
+        )
+        .group_by(Message.chat_id)
+        .subquery()
+    )
+
+    peer_user_id_sq = (
+        select(
+            ChatMember.chat_id.label("chat_id"),
+            func.min(ChatMember.user_id).label("peer_user_id"),
+        )
+        .where(ChatMember.user_id != user_id)
+        .group_by(ChatMember.chat_id)
+        .subquery()
+    )
+    peer_user = aliased(User)
+    peer_full_name = func.trim(
+        func.coalesce(peer_user.first_name, "")
+        + literal(" ")
+        + func.coalesce(peer_user.last_name, "")
+    )
+    title_expr = case(
+        (
+            Chat.type == ChatType.PRIVATE,
+            func.coalesce(
+                func.nullif(peer_full_name, ""),
+                func.nullif(peer_user.username, ""),
+                Chat.title,
+            ),
+        ),
+        else_=Chat.title,
+    )
+
+    statement = (
+        select(
+            Chat.id.label("id"),
+            title_expr.label("title"),
+            Chat.description.label("description"),
+            Chat.type.label("type"),
+            Chat.is_public.label("is_public"),
+            Chat.owner_id.label("owner_id"),
+            Chat.created_at.label("created_at"),
+            last_message_sq.c.last_message_preview.label("last_message_preview"),
+            last_message_sq.c.last_message_at.label("last_message_at"),
+            func.coalesce(unread_sq.c.unread_count, 0).label("unread_count"),
+            membership_sq.c.is_archived.label("is_archived"),
+            membership_sq.c.is_pinned.label("is_pinned"),
+            membership_sq.c.folder.label("folder"),
+        )
+        .join(membership_sq, membership_sq.c.chat_id == Chat.id)
+        .outerjoin(last_message_sq, last_message_sq.c.chat_id == Chat.id)
+        .outerjoin(unread_sq, unread_sq.c.chat_id == Chat.id)
+        .outerjoin(peer_user_id_sq, peer_user_id_sq.c.chat_id == Chat.id)
+        .outerjoin(peer_user, peer_user.id == peer_user_id_sq.c.peer_user_id)
     )
     if archived_only:
-        statement = statement.where(ChatMember.is_archived.is_(True))
+        statement = statement.where(membership_sq.c.is_archived.is_(True))
     elif not include_archived:
-        statement = statement.where(ChatMember.is_archived.is_(False))
+        statement = statement.where(membership_sq.c.is_archived.is_(False))
     if pinned_only:
-        statement = statement.where(ChatMember.is_pinned.is_(True))
+        statement = statement.where(membership_sq.c.is_pinned.is_(True))
     if folder is not None:
         normalized_folder = folder.strip().lower()
         if normalized_folder:
-            statement = statement.where(ChatMember.folder == normalized_folder)
+            statement = statement.where(membership_sq.c.folder == normalized_folder)
 
-    rows = db.execute(statement).all()
-    chats: list[Chat] = []
+    statement = statement.order_by(
+        desc(membership_sq.c.is_pinned),
+        desc(func.coalesce(last_message_sq.c.last_message_at, Chat.created_at)),
+        desc(Chat.id),
+    )
 
-    for chat, membership in rows:
-        last_message = db.scalar(
-            select(Message).where(Message.chat_id == chat.id).order_by(Message.id.desc()).limit(1)
-        )
-        last_preview = last_message.content if last_message else None
+    rows = db.execute(statement).mappings().all()
+    chats: list[dict] = []
+
+    for row in rows:
+        last_preview = row["last_message_preview"]
         if isinstance(last_preview, str) and len(last_preview) > 140:
             last_preview = f"{last_preview[:140]}..."
 
-        unread_count = db.scalar(
-            select(func.count(Message.id))
-            .select_from(Message)
-            .outerjoin(
-                MessageDelivery,
-                and_(
-                    MessageDelivery.message_id == Message.id,
-                    MessageDelivery.user_id == user_id,
-                ),
-            )
-            .where(
-                and_(
-                    Message.chat_id == chat.id,
-                    Message.sender_id != user_id,
-                    or_(
-                        MessageDelivery.id.is_(None),
-                        MessageDelivery.status != MessageDeliveryStatus.READ,
-                    ),
-                )
-            )
+        chats.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "description": row["description"],
+                "type": row["type"],
+                "is_public": bool(row["is_public"]),
+                "owner_id": row["owner_id"],
+                "created_at": row["created_at"],
+                "last_message_preview": last_preview,
+                "last_message_at": row["last_message_at"],
+                "unread_count": int(row["unread_count"] or 0),
+                "is_archived": bool(row["is_archived"]),
+                "is_pinned": bool(row["is_pinned"]),
+                "folder": row["folder"],
+            }
         )
-
-        if chat.type == ChatType.PRIVATE:
-            setattr(chat, "title", _private_chat_display_name(db, chat.id, user_id, chat.title))
-
-        setattr(chat, "last_message_preview", last_preview)
-        setattr(chat, "last_message_at", last_message.created_at if last_message else None)
-        setattr(chat, "unread_count", int(unread_count or 0))
-        setattr(chat, "is_archived", bool(membership.is_archived))
-        setattr(chat, "is_pinned", bool(membership.is_pinned))
-        setattr(chat, "folder", membership.folder)
-        setattr(chat, "_sort_ts", last_message.created_at if last_message else chat.created_at)
-        chats.append(chat)
-
-    chats.sort(key=lambda chat: getattr(chat, "_sort_ts", chat.created_at), reverse=True)
-    chats.sort(key=lambda chat: 0 if getattr(chat, "is_pinned", False) else 1)
     return chats
 
 

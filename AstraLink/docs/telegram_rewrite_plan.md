@@ -5,6 +5,13 @@
 AstraLink should be a **messenger first** product.
 Social features stay optional and should never dominate the main UX.
 
+## Current backend baseline
+
+- Schema is versioned with Alembic.
+- Startup uses migration bootstrap instead of runtime `create_all`.
+- Chat list backend resolves latest message, unread count, and pinned/archive state in one query path.
+- Realtime fanout is Redis-aware with safe local fallback when Redis is not configured.
+
 ## Architecture targets
 
 - Backend: FastAPI + PostgreSQL + Redis + WebSocket gateway

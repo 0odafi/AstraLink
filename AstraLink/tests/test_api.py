@@ -1,5 +1,9 @@
 from urllib.parse import quote_plus
 
+from sqlalchemy import inspect
+
+from app.core.database import engine
+
 TEST_AUTH_CODE = "12345"
 
 
@@ -110,7 +114,9 @@ def test_private_chat_and_messages_flow(client):
     assert alice_chats.status_code == 200, alice_chats.text
     chat_row = next((row for row in alice_chats.json() if row["id"] == chat_id), None)
     assert chat_row is not None
+    assert chat_row["title"] == "Bob Two"
     assert chat_row["last_message_preview"] in {"Hello Bob", "Hello Alice"}
+    assert chat_row["unread_count"] == 1
 
 
 def test_search_users_by_phone_and_username(client):
@@ -241,3 +247,8 @@ def test_refresh_and_release_endpoint(client):
     assert release.status_code == 200, release.text
     assert release.json()["platform"] == "windows"
     assert "volds.ru" in release.json()["download_url"]
+
+
+def test_database_is_versioned_after_startup(client):
+    _ = client.get("/health")
+    assert "alembic_version" in set(inspect(engine).get_table_names())

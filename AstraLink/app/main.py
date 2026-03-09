@@ -8,15 +8,21 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routers import auth, chats, realtime, releases, users
 from app.core.config import get_settings
-from app.core.database import create_tables
+from app.core.migrations import run_migrations
+from app.realtime.fanout import realtime_fanout
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    create_tables()
-    yield
+    if settings.database_auto_migrate:
+        run_migrations()
+    await realtime_fanout.startup()
+    try:
+        yield
+    finally:
+        await realtime_fanout.shutdown()
 
 
 app = FastAPI(

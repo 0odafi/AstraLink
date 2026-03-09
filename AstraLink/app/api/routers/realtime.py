@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.api.deps import get_current_user_from_raw_token
 from app.core.database import SessionLocal
 from app.models.chat import ChatMember, MessageDeliveryStatus
+from app.realtime.fanout import realtime_fanout
 from app.realtime.manager import chat_manager, user_realtime_manager
 from app.services.chat_service import (
     can_access_chat,
@@ -37,14 +38,17 @@ async def _broadcast_chat_event(
     *,
     exclude_chat_socket: WebSocket | None = None,
 ) -> None:
-    await chat_manager.broadcast(chat_id, payload, exclude=exclude_chat_socket)
-
     db = SessionLocal()
     try:
         member_ids = chat_member_ids(db, chat_id)
     finally:
         db.close()
-    await user_realtime_manager.broadcast_many(member_ids, payload)
+    await realtime_fanout.broadcast_chat_event(
+        chat_id=chat_id,
+        member_ids=member_ids,
+        payload=payload,
+        exclude_chat_socket=exclude_chat_socket,
+    )
 
 
 async def _broadcast_user_presence(user_id: int, status: str) -> None:
