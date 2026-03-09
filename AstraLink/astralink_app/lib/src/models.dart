@@ -193,6 +193,11 @@ class MessageItem {
   final DateTime createdAt;
   final String status;
   final DateTime? editedAt;
+  final int? replyToMessageId;
+  final int? forwardedFromMessageId;
+  final bool isPinned;
+  final List<MessageReactionItem> reactions;
+  final List<MessageAttachmentItem> attachments;
 
   const MessageItem({
     required this.id,
@@ -202,6 +207,11 @@ class MessageItem {
     required this.createdAt,
     required this.status,
     required this.editedAt,
+    this.replyToMessageId,
+    this.forwardedFromMessageId,
+    this.isPinned = false,
+    this.reactions = const [],
+    this.attachments = const [],
   });
 
   factory MessageItem.fromJson(Map<String, dynamic> json) {
@@ -215,9 +225,126 @@ class MessageItem {
       editedAt: json['edited_at'] == null
           ? null
           : DateTime.tryParse(json['edited_at'].toString()),
+      replyToMessageId: json['reply_to_message_id'] as int?,
+      forwardedFromMessageId: json['forwarded_from_message_id'] as int?,
+      isPinned: (json['is_pinned'] ?? false) == true,
+      reactions: ((json['reactions'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((row) => MessageReactionItem.fromJson(row.cast<String, dynamic>()))
+          .toList(),
+      attachments: ((json['attachments'] as List?) ?? const [])
+          .whereType<Map>()
+          .map(
+            (row) => MessageAttachmentItem.fromJson(row.cast<String, dynamic>()),
+          )
+          .toList(),
+    );
+  }
+
+  bool get hasAttachments => attachments.isNotEmpty;
+
+  MessageItem copyWith({
+    int? id,
+    int? chatId,
+    int? senderId,
+    String? content,
+    DateTime? createdAt,
+    String? status,
+    DateTime? editedAt,
+    Object? replyToMessageId = _sentinel,
+    Object? forwardedFromMessageId = _sentinel,
+    bool? isPinned,
+    List<MessageReactionItem>? reactions,
+    List<MessageAttachmentItem>? attachments,
+  }) {
+    return MessageItem(
+      id: id ?? this.id,
+      chatId: chatId ?? this.chatId,
+      senderId: senderId ?? this.senderId,
+      content: content ?? this.content,
+      createdAt: createdAt ?? this.createdAt,
+      status: status ?? this.status,
+      editedAt: editedAt ?? this.editedAt,
+      replyToMessageId: replyToMessageId == _sentinel
+          ? this.replyToMessageId
+          : replyToMessageId as int?,
+      forwardedFromMessageId: forwardedFromMessageId == _sentinel
+          ? this.forwardedFromMessageId
+          : forwardedFromMessageId as int?,
+      isPinned: isPinned ?? this.isPinned,
+      reactions: reactions ?? this.reactions,
+      attachments: attachments ?? this.attachments,
     );
   }
 }
+
+class MessageReactionItem {
+  final String emoji;
+  final int count;
+  final bool reactedByMe;
+
+  const MessageReactionItem({
+    required this.emoji,
+    required this.count,
+    required this.reactedByMe,
+  });
+
+  factory MessageReactionItem.fromJson(Map<String, dynamic> json) {
+    return MessageReactionItem(
+      emoji: (json['emoji'] ?? '').toString(),
+      count: (json['count'] ?? 0) as int,
+      reactedByMe: (json['reacted_by_me'] ?? false) == true,
+    );
+  }
+}
+
+class MessageAttachmentItem {
+  final int id;
+  final String fileName;
+  final String mimeType;
+  final int sizeBytes;
+  final String url;
+  final bool isImage;
+
+  const MessageAttachmentItem({
+    required this.id,
+    required this.fileName,
+    required this.mimeType,
+    required this.sizeBytes,
+    required this.url,
+    required this.isImage,
+  });
+
+  factory MessageAttachmentItem.fromJson(Map<String, dynamic> json) {
+    return MessageAttachmentItem(
+      id: json['id'] as int,
+      fileName: (json['file_name'] ?? '').toString(),
+      mimeType: (json['mime_type'] ?? '').toString(),
+      sizeBytes: (json['size_bytes'] ?? 0) as int,
+      url: (json['url'] ?? '').toString(),
+      isImage: (json['is_image'] ?? false) == true,
+    );
+  }
+}
+
+class MessageCursorPage {
+  final List<MessageItem> items;
+  final int? nextBeforeId;
+
+  const MessageCursorPage({required this.items, required this.nextBeforeId});
+
+  factory MessageCursorPage.fromJson(Map<String, dynamic> json) {
+    return MessageCursorPage(
+      items: ((json['items'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((row) => MessageItem.fromJson(row.cast<String, dynamic>()))
+          .toList(),
+      nextBeforeId: json['next_before_id'] as int?,
+    );
+  }
+}
+
+const Object _sentinel = Object();
 
 class ReleaseInfo {
   final String platform;

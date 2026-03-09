@@ -216,8 +216,10 @@ class ChatThreadViewModel extends ChangeNotifier {
   final ChatsLocalCache _cache;
 
   bool loading = true;
+  bool loadingMore = false;
   bool sending = false;
   List<MessageItem> messages = const [];
+  int? nextBeforeId;
   Timer? _persistDebounce;
 
   ChatThreadViewModel({
@@ -249,33 +251,71 @@ class ChatThreadViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<String?> loadMessages() async {
+  Future<String?> loadMessages({bool silent = false}) async {
     final tokens = _getTokens();
     if (tokens == null) return 'Session expired';
-    if (messages.isEmpty) {
+    if (!silent && messages.isEmpty) {
       loading = true;
       notifyListeners();
     }
     try {
-      final rows = await _api.listMessages(
+      final page = await _api.listMessagesCursor(
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         chatId: _chatId,
+        limit: 60,
       );
-      rows.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      final rows = [...page.items]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       messages = rows;
+      nextBeforeId = page.nextBeforeId;
       _schedulePersistMessages();
       return null;
     } catch (error) {
       if (messages.isEmpty) return error.toString();
       return null;
     } finally {
-      loading = false;
+      if (!silent) {
+        loading = false;
+      }
       notifyListeners();
     }
   }
 
-  Future<String?> sendMessage(String text) async {
+  Future<String?> loadMoreHistory() async {
+    if (loadingMore || nextBeforeId == null) return null;
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+
+    loadingMore = true;
+    notifyListeners();
+    try {
+      final page = await _api.listMessagesCursor(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: _chatId,
+        limit: 50,
+        beforeId: nextBeforeId,
+      );
+      nextBeforeId = page.nextBeforeId;
+      if (page.items.isEmpty) return null;
+
+      final existingIds = messages.map((row) => row.id).toSet();
+      final merged = [
+        ...page.items.where((row) => !existingIds.contains(row.id)),
+        ...messages,
+      ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      messages = merged;
+      _schedulePersistMessages();
+      return null;
+    } catch (error) {
+      return error.toString();
+    } finally {
+      loadingMore = false;
+      notifyListeners();
+    }
+  }
+
+  Future<String?> sendMessage(String text, {int? replyToMessageId}) async {
     final cleaned = text.trim();
     if (cleaned.isEmpty || sending) return null;
     final tokens = _getTokens();
@@ -289,13 +329,9 @@ class ChatThreadViewModel extends ChangeNotifier {
         refreshToken: tokens.refreshToken,
         chatId: _chatId,
         content: cleaned,
+        replyToMessageId: replyToMessageId,
       );
-      final hasExisting = messages.any((row) => row.id == sent.id);
-      if (!hasExisting) {
-        messages = [...messages, sent]
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-        _schedulePersistMessages();
-      }
+      applyUpdatedMessage(sent);
       return null;
     } catch (error) {
       return error.toString();
@@ -305,17 +341,89 @@ class ChatThreadViewModel extends ChangeNotifier {
     }
   }
 
+  Future<String?> editMessage({
+    required int messageId,
+    required String text,
+  }) async {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return null;
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+    try {
+      final updated = await _api.updateMessage(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        messageId: messageId,
+        content: cleaned,
+      );
+      applyUpdatedMessage(updated);
+      return null;
+    } catch (error) {
+      return error.toString();
+    }
+  }
+
+  Future<String?> deleteRemoteMessage(int messageId) async {
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+    try {
+      final removed = await _api.deleteMessage(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        messageId: messageId,
+      );
+      if (removed) {
+        deleteMessage(messageId);
+      }
+      return null;
+    } catch (error) {
+      return error.toString();
+    }
+  }
+
+  Future<String?> setMessagePinned({
+    required int messageId,
+    required bool pinned,
+  }) async {
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+    try {
+      if (pinned) {
+        await _api.pinMessage(
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          chatId: _chatId,
+          messageId: messageId,
+        );
+      } else {
+        await _api.unpinMessage(
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          chatId: _chatId,
+          messageId: messageId,
+        );
+      }
+      updatePinnedState(messageId: messageId, pinned: pinned);
+      return null;
+    } catch (error) {
+      return error.toString();
+    }
+  }
+
   void applyMessage(MessageItem item) {
-    final hasExisting = messages.any((row) => row.id == item.id);
-    if (hasExisting) return;
-    messages = [...messages, item]
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    _schedulePersistMessages();
-    notifyListeners();
+    applyUpdatedMessage(item);
   }
 
   void applyUpdatedMessage(MessageItem item) {
-    messages = messages.map((row) => row.id == item.id ? item : row).toList();
+    final existingIndex = messages.indexWhere((row) => row.id == item.id);
+    if (existingIndex == -1) {
+      messages = [...messages, item]
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    } else {
+      final next = [...messages];
+      next[existingIndex] = item;
+      messages = next;
+    }
     _schedulePersistMessages();
     notifyListeners();
   }
@@ -330,20 +438,39 @@ class ChatThreadViewModel extends ChangeNotifier {
     messages = messages
         .map(
           (row) => row.id == messageId
-              ? MessageItem(
-                  id: row.id,
-                  chatId: row.chatId,
-                  senderId: row.senderId,
-                  content: row.content,
-                  createdAt: row.createdAt,
-                  status: status,
-                  editedAt: row.editedAt,
-                )
+              ? row.copyWith(status: status)
               : row,
         )
         .toList();
     _schedulePersistMessages();
     notifyListeners();
+  }
+
+  void updatePinnedState({required int messageId, required bool pinned}) {
+    messages = messages
+        .map(
+          (row) => row.id == messageId ? row.copyWith(isPinned: pinned) : row,
+        )
+        .toList();
+    _schedulePersistMessages();
+    notifyListeners();
+  }
+
+  MessageItem? findMessageById(int messageId) {
+    for (final message in messages) {
+      if (message.id == messageId) return message;
+    }
+    return null;
+  }
+
+  MessageItem? get pinnedMessage {
+    MessageItem? pinned;
+    for (final message in messages) {
+      if (message.isPinned) {
+        pinned = message;
+      }
+    }
+    return pinned;
   }
 
   void _schedulePersistMessages() {

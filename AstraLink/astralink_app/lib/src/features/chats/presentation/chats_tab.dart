@@ -757,6 +757,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final RealtimeCursorStore _cursorStore = RealtimeCursorStore();
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
+  final _composerFocusNode = FocusNode();
 
   RealtimeMeSocket? _realtime;
   Timer? _typingPauseTimer;
@@ -765,6 +766,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _socketConnected = false;
   final Set<int> _typingUserIds = <int>{};
   int _realtimeCursor = 0;
+  int? _replyToMessageId;
+  int? _editingMessageId;
 
   @override
   void initState() {
@@ -778,6 +781,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
     unawaited(_loadDraft());
     unawaited(_bootstrapRealtime());
+    _scrollController.addListener(_onScroll);
   }
 
   @override
@@ -794,6 +798,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       );
       unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
       _messageController.clear();
+      _replyToMessageId = null;
+      _editingMessageId = null;
       unawaited(_loadDraft());
       unawaited(_bootstrapRealtime());
     }
@@ -807,6 +813,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _realtime?.stop();
     _messageController.dispose();
     _scrollController.dispose();
+    _composerFocusNode.dispose();
     super.dispose();
   }
 
@@ -855,6 +862,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     return ref.read(chatThreadViewModelProvider(_threadArgs)).sending;
   }
 
+  MessageItem? _messageById(int messageId) {
+    return ref.read(chatThreadViewModelProvider(_threadArgs)).findMessageById(
+      messageId,
+    );
+  }
+
   String _buildRealtimeUrl() {
     final tokens = widget.getTokens();
     if (tokens == null) return '';
@@ -887,7 +900,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         if (connected) {
           _ackUnreadMessages();
           unawaited(
-            ref.read(chatThreadViewModelProvider(_threadArgs)).loadMessages(),
+            ref
+                .read(chatThreadViewModelProvider(_threadArgs))
+                .loadMessages(silent: true),
           );
         }
       },
@@ -974,6 +989,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final messageId = map['message_id'];
       if (chatId is! int || messageId is! int) return;
       if (chatId != widget.chat.id) return;
+      if (_replyToMessageId == messageId || _editingMessageId == messageId) {
+        _clearComposerMode();
+      }
       ref
           .read(chatThreadViewModelProvider(_threadArgs))
           .deleteMessage(messageId);
@@ -989,6 +1007,31 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ref
           .read(chatThreadViewModelProvider(_threadArgs))
           .updateMessageStatus(messageId, senderStatus);
+      return;
+    }
+
+    if (type == 'message_pinned' || type == 'message_unpinned') {
+      final chatId = map['chat_id'];
+      final messageId = map['message_id'];
+      if (chatId is! int || messageId is! int) return;
+      if (chatId != widget.chat.id) return;
+      ref
+          .read(chatThreadViewModelProvider(_threadArgs))
+          .updatePinnedState(
+            messageId: messageId,
+            pinned: type == 'message_pinned',
+          );
+      return;
+    }
+
+    if (type == 'reaction_added' || type == 'reaction_removed') {
+      final chatId = map['chat_id'];
+      if (chatId is! int || chatId != widget.chat.id) return;
+      unawaited(
+        ref.read(chatThreadViewModelProvider(_threadArgs)).loadMessages(
+          silent: true,
+        ),
+      );
     }
   }
 
@@ -1047,18 +1090,183 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty || _sending) return;
-    final error = await ref
-        .read(chatThreadViewModelProvider(_threadArgs))
-        .sendMessage(text);
+    final vm = ref.read(chatThreadViewModelProvider(_threadArgs));
+    final error = _editingMessageId != null
+        ? await vm.editMessage(messageId: _editingMessageId!, text: text)
+        : await vm.sendMessage(text, replyToMessageId: _replyToMessageId);
     if (error == null) {
       _messageController.clear();
       _notifyTypingStopped();
       await _clearDraft();
+      _clearComposerMode();
       _scrollToBottom();
       if (mounted) setState(() {});
       return;
     }
     _showSnack(error);
+  }
+
+  void _clearComposerMode() {
+    if (!mounted) return;
+    setState(() {
+      _replyToMessageId = null;
+      _editingMessageId = null;
+    });
+  }
+
+  void _startReply(MessageItem message) {
+    setState(() {
+      _replyToMessageId = message.id;
+      _editingMessageId = null;
+    });
+    _composerFocusNode.requestFocus();
+  }
+
+  void _startEdit(MessageItem message) {
+    setState(() {
+      _editingMessageId = message.id;
+      _replyToMessageId = null;
+    });
+    _messageController.text = message.content;
+    _messageController.selection = TextSelection.collapsed(
+      offset: _messageController.text.length,
+    );
+    _onComposerChanged(_messageController.text);
+    _composerFocusNode.requestFocus();
+  }
+
+  Future<void> _deleteMessage(MessageItem message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Delete message'),
+          content: const Text('This action removes the message from the chat.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+
+    final error = await ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .deleteRemoteMessage(message.id);
+    if (error != null) {
+      _showSnack(error);
+      return;
+    }
+    if (_replyToMessageId == message.id || _editingMessageId == message.id) {
+      _clearComposerMode();
+      _messageController.clear();
+      await _clearDraft();
+    }
+  }
+
+  Future<void> _togglePin(MessageItem message) async {
+    final error = await ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .setMessagePinned(messageId: message.id, pinned: !message.isPinned);
+    if (error != null) {
+      _showSnack(error);
+    }
+  }
+
+  Future<void> _showMessageActions(MessageItem message) async {
+    final mine = message.senderId == widget.me.id;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.reply_rounded),
+                title: const Text('Reply'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _startReply(message);
+                },
+              ),
+              if (mine)
+                ListTile(
+                  leading: const Icon(Icons.edit_outlined),
+                  title: const Text('Edit'),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _startEdit(message);
+                  },
+                ),
+              ListTile(
+                leading: Icon(
+                  message.isPinned
+                      ? Icons.push_pin_outlined
+                      : Icons.push_pin_rounded,
+                ),
+                title: Text(
+                  message.isPinned ? 'Unpin message' : 'Pin message',
+                ),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_togglePin(message));
+                },
+              ),
+              if (mine)
+                ListTile(
+                  leading: const Icon(Icons.delete_outline_rounded),
+                  title: const Text('Delete'),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    unawaited(_deleteMessage(message));
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    if (_scrollController.position.pixels <= context.sp(96)) {
+      unawaited(_loadMoreHistory());
+    }
+  }
+
+  Future<void> _loadMoreHistory() async {
+    final vm = ref.read(chatThreadViewModelProvider(_threadArgs));
+    if (vm.loadingMore || vm.nextBeforeId == null) return;
+
+    final hadClients = _scrollController.hasClients;
+    final previousOffset = hadClients ? _scrollController.offset : 0.0;
+    final previousExtent = hadClients
+        ? _scrollController.position.maxScrollExtent
+        : 0.0;
+
+    final error = await vm.loadMoreHistory();
+    if (error != null) {
+      _showSnack(error);
+      return;
+    }
+
+    if (!hadClients) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final delta = _scrollController.position.maxScrollExtent - previousExtent;
+      final targetOffset = previousOffset + delta;
+      _scrollController.jumpTo(
+        targetOffset.clamp(0.0, _scrollController.position.maxScrollExtent),
+      );
+    });
   }
 
   void _scrollToBottom() {
@@ -1083,6 +1291,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Widget build(BuildContext context) {
     final vm = ref.watch(chatThreadViewModelProvider(_threadArgs));
     final appearance = ref.watch(appPreferencesProvider).appearance;
+    final pinnedMessage = vm.pinnedMessage;
+    final replyTarget = _replyToMessageId == null
+        ? null
+        : _messageById(_replyToMessageId!);
+    final editingTarget = _editingMessageId == null
+        ? null
+        : _messageById(_editingMessageId!);
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.chat.title),
@@ -1118,6 +1334,62 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         decoration: BoxDecoration(gradient: appearance.chatBackgroundGradient),
         child: Column(
           children: [
+            if (pinnedMessage != null)
+              Container(
+                margin: EdgeInsets.fromLTRB(
+                  context.sp(12),
+                  context.sp(10),
+                  context.sp(12),
+                  0,
+                ),
+                padding: EdgeInsets.symmetric(
+                  horizontal: context.sp(12),
+                  vertical: context.sp(10),
+                ),
+                decoration: BoxDecoration(
+                  color: appearance.surfaceColor.withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(context.sp(16)),
+                  border: Border.all(color: appearance.outlineColor),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.push_pin_rounded,
+                      size: context.sp(18),
+                      color: appearance.accentColor,
+                    ),
+                    SizedBox(width: context.sp(10)),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Pinned message',
+                            style: TextStyle(
+                              fontSize: context.sp(12),
+                              fontWeight: FontWeight.w700,
+                              color: appearance.accentColor,
+                            ),
+                          ),
+                          SizedBox(height: context.sp(2)),
+                          Text(
+                            pinnedMessage.content.trim().isEmpty
+                                ? 'Pinned media message'
+                                : pinnedMessage.content,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Unpin',
+                      onPressed: () => unawaited(_togglePin(pinnedMessage)),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+              ),
             Expanded(
               child: vm.loading
                   ? const Center(child: CircularProgressIndicator())
@@ -1136,14 +1408,42 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         horizontal: context.sp(12),
                         vertical: context.sp(10),
                       ),
-                      itemCount: vm.messages.length,
+                      itemCount: vm.messages.length + 1,
                       itemBuilder: (context, index) {
-                        final message = vm.messages[index];
+                        if (index == 0) {
+                          if (vm.loadingMore) {
+                            return Padding(
+                              padding: EdgeInsets.only(bottom: context.sp(8)),
+                              child: const Center(
+                                child: CircularProgressIndicator(),
+                              ),
+                            );
+                          }
+                          if (vm.nextBeforeId != null) {
+                            return Padding(
+                              padding: EdgeInsets.only(bottom: context.sp(8)),
+                              child: Center(
+                                child: OutlinedButton.icon(
+                                  onPressed: _loadMoreHistory,
+                                  icon: const Icon(Icons.history_rounded),
+                                  label: const Text('Load earlier messages'),
+                                ),
+                              ),
+                            );
+                          }
+                          return const SizedBox.shrink();
+                        }
+
+                        final message = vm.messages[index - 1];
                         final mine = message.senderId == widget.me.id;
                         return _MessageBubble(
                           message: message,
+                          repliedMessage: message.replyToMessageId == null
+                              ? null
+                              : vm.findMessageById(message.replyToMessageId!),
                           mine: mine,
                           appearance: appearance,
+                          onLongPress: () => _showMessageActions(message),
                         );
                       },
                     ),
@@ -1167,6 +1467,70 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (_editingMessageId != null || _replyToMessageId != null)
+                      Container(
+                        width: double.infinity,
+                        margin: EdgeInsets.only(bottom: context.sp(8)),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: context.sp(12),
+                          vertical: context.sp(10),
+                        ),
+                        decoration: BoxDecoration(
+                          color: appearance.accentColorMuted.withValues(
+                            alpha: 0.84,
+                          ),
+                          borderRadius: BorderRadius.circular(context.sp(14)),
+                          border: Border.all(color: appearance.outlineColor),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _editingMessageId != null
+                                  ? Icons.edit_outlined
+                                  : Icons.reply_rounded,
+                              size: context.sp(18),
+                              color: appearance.accentColor,
+                            ),
+                            SizedBox(width: context.sp(10)),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _editingMessageId != null
+                                        ? 'Editing message'
+                                        : 'Replying',
+                                    style: TextStyle(
+                                      fontSize: context.sp(12),
+                                      fontWeight: FontWeight.w700,
+                                      color: appearance.accentColor,
+                                    ),
+                                  ),
+                                  SizedBox(height: context.sp(2)),
+                                  Text(
+                                    (_editingMessageId != null
+                                                ? editingTarget?.content
+                                                : replyTarget?.content)
+                                            ?.trim()
+                                            .isNotEmpty ==
+                                        true
+                                        ? (_editingMessageId != null
+                                              ? editingTarget!.content
+                                              : replyTarget!.content)
+                                        : 'Selected message',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: _clearComposerMode,
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                          ],
+                        ),
+                      ),
                     if (_messageController.text.trim().isNotEmpty)
                       Padding(
                         padding: EdgeInsets.only(bottom: context.sp(6)),
@@ -1185,10 +1549,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         Expanded(
                           child: TextField(
                             controller: _messageController,
+                            focusNode: _composerFocusNode,
                             minLines: 1,
                             maxLines: 5,
-                            decoration: const InputDecoration(
-                              hintText: 'Message',
+                            decoration: InputDecoration(
+                              hintText: _editingMessageId != null
+                                  ? 'Edit message'
+                                  : 'Message',
                             ),
                             onChanged: _onComposerChanged,
                           ),
@@ -1225,13 +1592,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
 class _MessageBubble extends StatelessWidget {
   final MessageItem message;
+  final MessageItem? repliedMessage;
   final bool mine;
   final AppAppearanceData appearance;
+  final VoidCallback? onLongPress;
 
   const _MessageBubble({
     required this.message,
+    required this.repliedMessage,
     required this.mine,
     required this.appearance,
+    this.onLongPress,
   });
 
   @override
@@ -1252,42 +1623,196 @@ class _MessageBubble extends StatelessWidget {
       bottomLeft: Radius.circular(mine ? context.sp(16) : context.sp(4)),
       bottomRight: Radius.circular(mine ? context.sp(4) : context.sp(16)),
     );
+    final replyPreview = repliedMessage?.content.trim().isNotEmpty == true
+        ? repliedMessage!.content
+        : message.replyToMessageId != null
+        ? 'Reply to message'
+        : null;
+    final attachmentColor = Theme.of(context).colorScheme.onSurfaceVariant;
 
     return Align(
       alignment: alignment,
-      child: Container(
-        margin: EdgeInsets.symmetric(vertical: context.sp(4)),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.78,
-        ),
-        padding: EdgeInsets.symmetric(
-          horizontal: context.sp(12),
-          vertical: context.sp(8),
-        ),
-        decoration: BoxDecoration(
-          color: bubbleColor,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onLongPress: onLongPress,
           borderRadius: radius,
-          border: Border.all(color: borderColor),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                message.content,
-                style: TextStyle(fontSize: textSize),
-              ),
+          child: Container(
+            margin: EdgeInsets.symmetric(vertical: context.sp(4)),
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.78,
             ),
-            SizedBox(height: context.sp(4)),
-            Text(
-              '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')} ${mine ? _statusMark(message.status) : ''}',
-              style: TextStyle(
-                fontSize: metaSize,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+            padding: EdgeInsets.symmetric(
+              horizontal: context.sp(12),
+              vertical: context.sp(8),
             ),
-          ],
+            decoration: BoxDecoration(
+              color: bubbleColor,
+              borderRadius: radius,
+              border: Border.all(color: borderColor),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (replyPreview != null)
+                  Container(
+                    width: double.infinity,
+                    margin: EdgeInsets.only(bottom: context.sp(8)),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: context.sp(10),
+                      vertical: context.sp(8),
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(context.sp(12)),
+                      border: Border(
+                        left: BorderSide(
+                          color: appearance.accentColor,
+                          width: context.sp(3),
+                        ),
+                      ),
+                    ),
+                    child: Text(
+                      replyPreview,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: context.sp(12) * appearance.messageTextScale,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                if (message.content.trim().isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      message.content,
+                      style: TextStyle(fontSize: textSize),
+                    ),
+                  ),
+                if (message.attachments.isNotEmpty)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: message.content.trim().isEmpty ? 0 : context.sp(8),
+                    ),
+                    child: Column(
+                      children: message.attachments
+                          .map(
+                            (attachment) => Container(
+                              width: double.infinity,
+                              margin: EdgeInsets.only(bottom: context.sp(6)),
+                              padding: EdgeInsets.symmetric(
+                                horizontal: context.sp(10),
+                                vertical: context.sp(8),
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.08),
+                                borderRadius: BorderRadius.circular(
+                                  context.sp(12),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    attachment.isImage
+                                        ? Icons.image_outlined
+                                        : Icons.attach_file_rounded,
+                                    size: context.sp(18),
+                                    color: attachmentColor,
+                                  ),
+                                  SizedBox(width: context.sp(8)),
+                                  Expanded(
+                                    child: Text(
+                                      attachment.fileName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize:
+                                            context.sp(13) *
+                                            appearance.messageTextScale,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                if (message.reactions.isNotEmpty)
+                  Padding(
+                    padding: EdgeInsets.only(top: context.sp(4)),
+                    child: Wrap(
+                      spacing: context.sp(6),
+                      runSpacing: context.sp(6),
+                      children: message.reactions
+                          .map(
+                            (reaction) => Container(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: context.sp(8),
+                                vertical: context.sp(4),
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(999),
+                                border: Border.all(
+                                  color: reaction.reactedByMe
+                                      ? appearance.accentColor
+                                      : borderColor,
+                                ),
+                              ),
+                              child: Text(
+                                '${reaction.emoji} ${reaction.count}',
+                                style: TextStyle(
+                                  fontSize:
+                                      context.sp(11) *
+                                      appearance.messageTextScale,
+                                ),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                SizedBox(height: context.sp(4)),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (message.isPinned)
+                      Padding(
+                        padding: EdgeInsets.only(right: context.sp(4)),
+                        child: Icon(
+                          Icons.push_pin_rounded,
+                          size: context.sp(14),
+                          color: appearance.accentColor,
+                        ),
+                      ),
+                    if (message.editedAt != null)
+                      Padding(
+                        padding: EdgeInsets.only(right: context.sp(6)),
+                        child: Text(
+                          'edited',
+                          style: TextStyle(
+                            fontSize: metaSize,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    Text(
+                      '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')} ${mine ? _statusMark(message.status) : ''}',
+                      style: TextStyle(
+                        fontSize: metaSize,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

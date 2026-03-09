@@ -253,6 +253,26 @@ class AstraApi {
     ).map((item) => MessageItem.fromJson(item)).toList();
   }
 
+  Future<MessageCursorPage> listMessagesCursor({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    int limit = 50,
+    int? beforeId,
+  }) async {
+    final query = StringBuffer('limit=$limit');
+    if (beforeId != null) {
+      query.write('&before_id=$beforeId');
+    }
+    final response = await _authorizedRequest(
+      'GET',
+      '/api/chats/$chatId/messages/cursor?$query',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return MessageCursorPage.fromJson(_jsonMap(response));
+  }
+
   Future<void> updateChatState({
     required String accessToken,
     String? refreshToken,
@@ -280,15 +300,79 @@ class AstraApi {
     String? refreshToken,
     required int chatId,
     required String content,
+    int? replyToMessageId,
   }) async {
+    final payload = <String, dynamic>{'content': content};
+    if (replyToMessageId != null) {
+      payload['reply_to_message_id'] = replyToMessageId;
+    }
     final response = await _authorizedRequest(
       'POST',
       '/api/chats/$chatId/messages',
       accessToken: accessToken,
       refreshToken: refreshToken,
+      body: payload,
+    );
+    return MessageItem.fromJson(_jsonMap(response));
+  }
+
+  Future<MessageItem> updateMessage({
+    required String accessToken,
+    String? refreshToken,
+    required int messageId,
+    required String content,
+  }) async {
+    final response = await _authorizedRequest(
+      'PATCH',
+      '/api/chats/messages/$messageId',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
       body: {'content': content},
     );
     return MessageItem.fromJson(_jsonMap(response));
+  }
+
+  Future<bool> deleteMessage({
+    required String accessToken,
+    String? refreshToken,
+    required int messageId,
+  }) async {
+    final response = await _authorizedRequest(
+      'DELETE',
+      '/api/chats/messages/$messageId',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    final json = _jsonMap(response);
+    return (json['removed'] ?? false) == true;
+  }
+
+  Future<void> pinMessage({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    required int messageId,
+  }) async {
+    await _authorizedRequest(
+      'POST',
+      '/api/chats/$chatId/messages/$messageId/pin',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+  }
+
+  Future<void> unpinMessage({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    required int messageId,
+  }) async {
+    await _authorizedRequest(
+      'DELETE',
+      '/api/chats/$chatId/messages/$messageId/pin',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
   }
 
   Future<List<AppUser>> searchUsers({
@@ -420,6 +504,13 @@ class AstraApi {
         break;
       case 'PATCH':
         response = await http.patch(
+          uri,
+          headers: mergedHeaders,
+          body: body == null ? null : jsonEncode(body),
+        );
+        break;
+      case 'DELETE':
+        response = await http.delete(
           uri,
           headers: mergedHeaders,
           body: body == null ? null : jsonEncode(body),

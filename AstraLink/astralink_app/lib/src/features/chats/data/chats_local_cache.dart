@@ -6,7 +6,7 @@ import '../../../models.dart';
 
 class ChatsLocalCache {
   static const String _chatsPrefix = 'astralink.cache.v1.chats';
-  static const String _messagesPrefix = 'astralink.cache.v1.messages';
+  static const String _messagesPrefix = 'astralink.cache.v2.messages';
 
   final Future<SharedPreferences> Function() _prefsFactory;
 
@@ -121,6 +121,30 @@ class ChatsLocalCache {
       'created_at': message.createdAt.toIso8601String(),
       'status': message.status,
       'edited_at': message.editedAt?.toIso8601String(),
+      'reply_to_message_id': message.replyToMessageId,
+      'forwarded_from_message_id': message.forwardedFromMessageId,
+      'is_pinned': message.isPinned,
+      'reactions': message.reactions
+          .map(
+            (reaction) => {
+              'emoji': reaction.emoji,
+              'count': reaction.count,
+              'reacted_by_me': reaction.reactedByMe,
+            },
+          )
+          .toList(),
+      'attachments': message.attachments
+          .map(
+            (attachment) => {
+              'id': attachment.id,
+              'file_name': attachment.fileName,
+              'mime_type': attachment.mimeType,
+              'size_bytes': attachment.sizeBytes,
+              'url': attachment.url,
+              'is_image': attachment.isImage,
+            },
+          )
+          .toList(),
     };
   }
 }
