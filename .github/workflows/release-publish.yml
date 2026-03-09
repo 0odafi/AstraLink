@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "App version (e.g. 1.0.1+2)"
-        required: true
+        description: "App version (optional if workflow runs on tag ref, e.g. v1.0.1+2)"
+        required: false
         type: string
       channel:
         description: "Release channel"
@@ -41,11 +41,21 @@ jobs:
             VERSION="${{ github.event.inputs.version }}"
             CHANNEL="${{ github.event.inputs.channel }}"
             MANDATORY="${{ github.event.inputs.mandatory }}"
+            if [ -z "$VERSION" ]; then
+              if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+                VERSION="${GITHUB_REF_NAME}"
+              else
+                echo "workflow_dispatch without version is allowed only when running on a tag ref." >&2
+                echo "Either select tag ref like v1.2.3+4 or fill version input." >&2
+                exit 1
+              fi
+            fi
           else
-            VERSION="${GITHUB_REF_NAME#v}"
+            VERSION="${GITHUB_REF_NAME}"
             CHANNEL="stable"
             MANDATORY="false"
           fi
+          VERSION="${VERSION#v}"
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$'; then
             echo "Invalid version format: $VERSION" >&2
             echo "Expected format: x.y.z+build" >&2
