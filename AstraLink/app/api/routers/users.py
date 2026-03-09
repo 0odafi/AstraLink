@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.models.user import User
-from app.schemas.user import ProfileUpdate, UserPublic
+from app.schemas.user import ProfileUpdate, UserPublic, UsernameCheckOut
 from app.services.user_service import (
+    USERNAME_RULES_MESSAGE,
     ensure_username_available,
     find_user_by_phone_or_username,
     is_probable_phone,
@@ -38,23 +39,46 @@ def update_me(
     if payload.last_name is not None:
         current_user.last_name = payload.last_name.strip()
 
-    if payload.username is not None:
-        normalized_username = normalize_username(payload.username)
-        if not validate_username(normalized_username):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username format: start with letter, letters/digits/underscore, length 5-32",
-            )
-        try:
-            ensure_username_available(db, normalized_username, current_user_id=current_user.id)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        current_user.username = normalized_username
+    if "username" in payload.model_fields_set:
+        requested_username = (payload.username or "").strip()
+        if not requested_username:
+            current_user.username = None
+        else:
+            normalized_username = normalize_username(requested_username)
+            if not validate_username(normalized_username):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=USERNAME_RULES_MESSAGE,
+                )
+            try:
+                ensure_username_available(db, normalized_username, current_user_id=current_user.id)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            current_user.username = normalized_username
 
     db.add(current_user)
     db.commit()
     db.refresh(current_user)
     return UserPublic.model_validate(current_user)
+
+
+@router.get("/username-check", response_model=UsernameCheckOut)
+def username_check(
+    username: str = Query(..., min_length=1, max_length=40),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UsernameCheckOut:
+    normalized_username = normalize_username(username)
+    if not validate_username(normalized_username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=USERNAME_RULES_MESSAGE,
+        )
+    try:
+        ensure_username_available(db, normalized_username, current_user_id=current_user.id)
+    except ValueError:
+        return UsernameCheckOut(username=normalized_username, available=False)
+    return UsernameCheckOut(username=normalized_username, available=True)
 
 
 @router.get("/search", response_model=list[UserPublic])

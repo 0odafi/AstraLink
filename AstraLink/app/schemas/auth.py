@@ -23,13 +23,13 @@ class PhoneCodeVerifyRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=40)
+    username: str = Field(min_length=5, max_length=32)
     email: str = Field(min_length=5, max_length=120)
     password: str = Field(min_length=8, max_length=128)
 
 
 class LoginRequest(BaseModel):
-    login: str = Field(min_length=3, max_length=120, description="Username or email")
+    login: str = Field(min_length=3, max_length=120, description="Username, email or phone")
     password: str = Field(min_length=8, max_length=128)
 
 

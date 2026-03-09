@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
@@ -23,20 +26,27 @@ class ProfileTab extends StatefulWidget {
 }
 
 class _ProfileTabState extends State<ProfileTab> {
+  static final RegExp _usernamePattern = RegExp(r'^[a-z][a-z0-9_]{4,31}$');
+
   late TextEditingController _usernameController;
   late TextEditingController _firstNameController;
   late TextEditingController _lastNameController;
   late TextEditingController _bioController;
 
+  Timer? _usernameDebounce;
+  bool _checkingUsername = false;
+  bool? _usernameAvailable;
+  String? _checkedUsername;
   bool _saving = false;
 
   @override
   void initState() {
     super.initState();
-    _usernameController = TextEditingController(text: widget.me.username);
+    _usernameController = TextEditingController(text: widget.me.username ?? '');
     _firstNameController = TextEditingController(text: widget.me.firstName);
     _lastNameController = TextEditingController(text: widget.me.lastName);
     _bioController = TextEditingController(text: widget.me.bio);
+    _syncUsernameState(immediate: true);
   }
 
   @override
@@ -47,15 +57,17 @@ class _ProfileTabState extends State<ProfileTab> {
         oldWidget.me.firstName != widget.me.firstName ||
         oldWidget.me.lastName != widget.me.lastName ||
         oldWidget.me.bio != widget.me.bio) {
-      _usernameController.text = widget.me.username;
+      _usernameController.text = widget.me.username ?? '';
       _firstNameController.text = widget.me.firstName;
       _lastNameController.text = widget.me.lastName;
       _bioController.text = widget.me.bio;
+      _syncUsernameState(immediate: true);
     }
   }
 
   @override
   void dispose() {
+    _usernameDebounce?.cancel();
     _usernameController.dispose();
     _firstNameController.dispose();
     _lastNameController.dispose();
@@ -63,8 +75,181 @@ class _ProfileTabState extends State<ProfileTab> {
     super.dispose();
   }
 
+  String get _currentUsername =>
+      (widget.me.username ?? '').trim().toLowerCase();
+
+  String get _normalizedUsername => _usernameController.text
+      .trim()
+      .replaceFirst(RegExp(r'^@+'), '')
+      .toLowerCase();
+
+  bool get _usernameProvided => _normalizedUsername.isNotEmpty;
+
+  String? get _usernameFormatError {
+    if (!_usernameProvided) return null;
+    if (_usernamePattern.hasMatch(_normalizedUsername)) return null;
+    return '5-32 chars, start with a letter, use letters, numbers or underscore.';
+  }
+
+  bool get _usernameResolved {
+    if (!_usernameProvided) return true;
+    if (_normalizedUsername == _currentUsername) return true;
+    return !_checkingUsername &&
+        _checkedUsername == _normalizedUsername &&
+        _usernameAvailable == true;
+  }
+
+  bool get _hasChanges =>
+      _normalizedUsername != _currentUsername ||
+      _firstNameController.text.trim() != widget.me.firstName ||
+      _lastNameController.text.trim() != widget.me.lastName ||
+      _bioController.text.trim() != widget.me.bio;
+
+  bool get _canSave =>
+      !_saving &&
+      _hasChanges &&
+      _firstNameController.text.trim().isNotEmpty &&
+      _usernameFormatError == null &&
+      _usernameResolved;
+
+  String? get _usernameErrorText {
+    final formatError = _usernameFormatError;
+    if (formatError != null) return formatError;
+    if (_usernameProvided &&
+        !_checkingUsername &&
+        _checkedUsername == _normalizedUsername &&
+        _usernameAvailable == false) {
+      return 'This username is already taken.';
+    }
+    return null;
+  }
+
+  String get _usernameHelperText {
+    if (!_usernameProvided) {
+      return 'Optional. Leave blank to remove public @username.';
+    }
+    if (_normalizedUsername == _currentUsername) {
+      return 'This is your current public username.';
+    }
+    if (_checkingUsername) return 'Checking availability...';
+    if (_checkedUsername == _normalizedUsername && _usernameAvailable == true) {
+      return 'Username is available.';
+    }
+    return 'People can find you by this @username.';
+  }
+
+  Widget? get _usernameSuffix {
+    if (_checkingUsername) {
+      return Padding(
+        padding: const EdgeInsets.all(12),
+        child: SizedBox(
+          width: context.sp(16),
+          height: context.sp(16),
+          child: const CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (_usernameProvided &&
+        _checkedUsername == _normalizedUsername &&
+        _usernameAvailable == true &&
+        _usernameFormatError == null) {
+      return Icon(
+        Icons.check_circle_rounded,
+        color: Theme.of(context).colorScheme.primary,
+      );
+    }
+    return null;
+  }
+
+  void _handleUsernameChanged(String value) {
+    final sanitized = value.replaceFirst(RegExp(r'^@+'), '');
+    if (sanitized != value) {
+      _usernameController.value = TextEditingValue(
+        text: sanitized,
+        selection: TextSelection.collapsed(offset: sanitized.length),
+      );
+    }
+    _syncUsernameState();
+  }
+
+  void _syncUsernameState({bool immediate = false}) {
+    _usernameDebounce?.cancel();
+    final normalized = _normalizedUsername;
+
+    if (normalized.isEmpty) {
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = null;
+        _usernameAvailable = null;
+      });
+      return;
+    }
+
+    if (_usernameFormatError != null) {
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = null;
+      });
+      return;
+    }
+
+    if (normalized == _currentUsername) {
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = true;
+      });
+      return;
+    }
+
+    void runCheck() {
+      if (!mounted) return;
+      setState(() {
+        _checkingUsername = true;
+        _checkedUsername = normalized;
+        _usernameAvailable = null;
+      });
+      unawaited(_checkUsername(normalized));
+    }
+
+    if (immediate) {
+      runCheck();
+    } else {
+      _usernameDebounce = Timer(const Duration(milliseconds: 350), runCheck);
+      setState(() {});
+    }
+  }
+
+  Future<void> _checkUsername(String normalized) async {
+    final tokens = widget.getTokens();
+    if (tokens == null) return;
+
+    try {
+      final result = await widget.api.checkUsername(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        username: normalized,
+      );
+      if (!mounted || _normalizedUsername != normalized) return;
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = result.available;
+      });
+    } catch (error) {
+      if (!mounted || _normalizedUsername != normalized) return;
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = null;
+      });
+      _showSnack(error.toString());
+    }
+  }
+
   Future<void> _saveProfile() async {
-    if (_saving) return;
+    if (!_canSave) return;
     final tokens = widget.getTokens();
     if (tokens == null) return;
 
@@ -73,7 +258,7 @@ class _ProfileTabState extends State<ProfileTab> {
       final updated = await widget.api.updateMe(
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
-        username: _usernameController.text.trim(),
+        username: _usernameProvided ? _normalizedUsername : '',
         firstName: _firstNameController.text.trim(),
         lastName: _lastNameController.text.trim(),
         bio: _bioController.text.trim(),
@@ -125,12 +310,23 @@ class _ProfileTabState extends State<ProfileTab> {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
+                  SizedBox(height: context.sp(4)),
+                  Text(
+                    widget.me.publicHandle ?? 'No public username',
+                    style: TextStyle(
+                      fontSize: context.sp(14),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
                   if (widget.me.phone != null)
-                    Text(
-                      widget.me.phone!,
-                      style: TextStyle(
-                        fontSize: context.sp(14),
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    Padding(
+                      padding: EdgeInsets.only(top: context.sp(4)),
+                      child: Text(
+                        widget.me.phone!,
+                        style: TextStyle(
+                          fontSize: context.sp(14),
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
                 ],
@@ -140,8 +336,19 @@ class _ProfileTabState extends State<ProfileTab> {
           SizedBox(height: context.sp(10)),
           TextField(
             controller: _usernameController,
-            decoration: const InputDecoration(labelText: 'Username'),
-            onChanged: (_) => setState(() {}),
+            autocorrect: false,
+            textCapitalization: TextCapitalization.none,
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9_@]')),
+            ],
+            decoration: InputDecoration(
+              labelText: 'Public username',
+              prefixText: '@',
+              helperText: _usernameHelperText,
+              errorText: _usernameErrorText,
+              suffixIcon: _usernameSuffix,
+            ),
+            onChanged: _handleUsernameChanged,
           ),
           SizedBox(height: context.sp(10)),
           TextField(
@@ -165,7 +372,7 @@ class _ProfileTabState extends State<ProfileTab> {
           ),
           SizedBox(height: context.sp(14)),
           FilledButton(
-            onPressed: _saving ? null : _saveProfile,
+            onPressed: _canSave ? _saveProfile : null,
             child: _saving
                 ? SizedBox(
                     width: context.sp(16),
@@ -179,4 +386,3 @@ class _ProfileTabState extends State<ProfileTab> {
     );
   }
 }
-

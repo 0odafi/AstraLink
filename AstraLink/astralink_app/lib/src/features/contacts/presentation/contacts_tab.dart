@@ -32,6 +32,23 @@ class _ContactsTabState extends State<ContactsTab> {
     super.dispose();
   }
 
+  String? _userChatQuery(AppUser user) {
+    final handle = user.publicHandle;
+    if (handle != null && handle.isNotEmpty) return handle;
+    final phone = user.phone?.trim();
+    if (phone != null && phone.isNotEmpty) return phone;
+    return null;
+  }
+
+  String _subtitleForUser(AppUser user) {
+    final parts = <String>[
+      if (user.publicHandle != null) user.publicHandle!,
+      if (user.phone != null && user.phone!.trim().isNotEmpty) user.phone!,
+    ];
+    if (parts.isEmpty) return 'No public username';
+    return parts.join('  •  ');
+  }
+
   Future<void> _search() async {
     final query = _searchController.text.trim();
     final tokens = widget.getTokens();
@@ -65,7 +82,7 @@ class _ContactsTabState extends State<ContactsTab> {
           content: TextField(
             controller: queryController,
             autofocus: true,
-            decoration: const InputDecoration(hintText: 'Phone or username'),
+            decoration: const InputDecoration(hintText: 'Phone or @username'),
           ),
           actions: [
             TextButton(
@@ -83,6 +100,37 @@ class _ContactsTabState extends State<ContactsTab> {
     );
 
     if (query == null || query.isEmpty) return;
+    final tokens = widget.getTokens();
+    if (tokens == null) return;
+    try {
+      final chat = await widget.api.openPrivateChat(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        query: query,
+      );
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(
+            api: widget.api,
+            getTokens: widget.getTokens,
+            chat: chat,
+            me: widget.me,
+          ),
+        ),
+      );
+    } catch (error) {
+      _showSnack(error.toString());
+    }
+  }
+
+  Future<void> _openChatForUser(AppUser user) async {
+    final query = _userChatQuery(user);
+    if (query == null) {
+      _showSnack('This user has neither phone nor public username.');
+      return;
+    }
+
     final tokens = widget.getTokens();
     if (tokens == null) return;
     try {
@@ -134,7 +182,7 @@ class _ContactsTabState extends State<ContactsTab> {
               controller: _searchController,
               decoration: const InputDecoration(
                 prefixIcon: Icon(Icons.search_rounded),
-                hintText: 'Search by phone / username / name',
+                hintText: 'Search by phone, @username or name',
               ),
               onSubmitted: (_) => _search(),
               onChanged: (_) => setState(() {}),
@@ -174,33 +222,8 @@ class _ContactsTabState extends State<ContactsTab> {
                               ),
                             ),
                             title: Text(user.displayName),
-                            subtitle: Text(
-                              '@${user.username}${user.phone == null ? '' : '  ${user.phone}'}',
-                            ),
-                            onTap: () async {
-                              final tokens = widget.getTokens();
-                              if (tokens == null) return;
-                              try {
-                                final chat = await widget.api.openPrivateChat(
-                                  accessToken: tokens.accessToken,
-                                  refreshToken: tokens.refreshToken,
-                                  query: user.username,
-                                );
-                                if (!context.mounted) return;
-                                await Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => ChatScreen(
-                                      api: widget.api,
-                                      getTokens: widget.getTokens,
-                                      chat: chat,
-                                      me: widget.me,
-                                    ),
-                                  ),
-                                );
-                              } catch (error) {
-                                _showSnack(error.toString());
-                              }
-                            },
+                            subtitle: Text(_subtitleForUser(user)),
+                            onTap: () => _openChatForUser(user),
                           ),
                         );
                       },
@@ -212,4 +235,3 @@ class _ContactsTabState extends State<ContactsTab> {
     );
   }
 }
-

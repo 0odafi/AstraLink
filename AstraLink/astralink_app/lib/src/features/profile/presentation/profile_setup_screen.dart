@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
@@ -31,6 +34,10 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   late final TextEditingController _lastNameController;
   late final TextEditingController _usernameController;
 
+  Timer? _usernameDebounce;
+  bool _checkingUsername = false;
+  bool? _usernameAvailable;
+  String? _checkedUsername;
   bool _saving = false;
 
   @override
@@ -39,28 +46,190 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     _firstNameController = TextEditingController(text: widget.user.firstName);
     _lastNameController = TextEditingController(text: widget.user.lastName);
     _usernameController = TextEditingController(
-      text: widget.user.usernameLooksGenerated ? '' : widget.user.username,
+      text: widget.user.usernameLooksGenerated
+          ? ''
+          : (widget.user.username ?? ''),
     );
+    _syncUsernameState(immediate: true);
   }
 
   @override
   void dispose() {
+    _usernameDebounce?.cancel();
     _firstNameController.dispose();
     _lastNameController.dispose();
     _usernameController.dispose();
     super.dispose();
   }
 
-  String get _normalizedUsername =>
-      _usernameController.text.trim().toLowerCase();
+  String get _currentUsername =>
+      (widget.user.username ?? '').trim().toLowerCase();
 
-  bool get _usernameValid => _usernamePattern.hasMatch(_normalizedUsername);
+  String get _normalizedUsername => _usernameController.text
+      .trim()
+      .replaceFirst(RegExp(r'^@+'), '')
+      .toLowerCase();
+
+  bool get _usernameProvided => _normalizedUsername.isNotEmpty;
+
+  String? get _usernameFormatError {
+    if (!_usernameProvided) return null;
+    if (_usernamePattern.hasMatch(_normalizedUsername)) return null;
+    return '5-32 chars, start with a letter, use letters, numbers or underscore.';
+  }
+
+  bool get _usernameResolved {
+    if (!_usernameProvided) return true;
+    if (_normalizedUsername == _currentUsername) return true;
+    return !_checkingUsername &&
+        _checkedUsername == _normalizedUsername &&
+        _usernameAvailable == true;
+  }
 
   bool get _canContinue =>
-      _firstNameController.text.trim().isNotEmpty && _usernameValid;
+      _firstNameController.text.trim().isNotEmpty &&
+      _usernameFormatError == null &&
+      _usernameResolved &&
+      !_saving;
+
+  String? get _usernameErrorText {
+    final formatError = _usernameFormatError;
+    if (formatError != null) return formatError;
+    if (_usernameProvided &&
+        !_checkingUsername &&
+        _checkedUsername == _normalizedUsername &&
+        _usernameAvailable == false) {
+      return 'This username is already taken.';
+    }
+    return null;
+  }
+
+  String get _usernameHelperText {
+    if (!_usernameProvided) {
+      return 'Optional. Add a public @username now or skip and set it later.';
+    }
+    if (_normalizedUsername == _currentUsername) {
+      return 'This is already your public username.';
+    }
+    if (_checkingUsername) return 'Checking availability...';
+    if (_checkedUsername == _normalizedUsername && _usernameAvailable == true) {
+      return 'Username is available.';
+    }
+    return 'People will be able to find you by this @username.';
+  }
+
+  Widget? get _usernameSuffix {
+    if (_checkingUsername) {
+      return Padding(
+        padding: const EdgeInsets.all(12),
+        child: SizedBox(
+          width: context.sp(16),
+          height: context.sp(16),
+          child: const CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (_usernameProvided &&
+        _checkedUsername == _normalizedUsername &&
+        _usernameAvailable == true &&
+        _usernameFormatError == null) {
+      return Icon(
+        Icons.check_circle_rounded,
+        color: Theme.of(context).colorScheme.primary,
+      );
+    }
+    return null;
+  }
+
+  void _handleUsernameChanged(String value) {
+    final sanitized = value.replaceFirst(RegExp(r'^@+'), '');
+    if (sanitized != value) {
+      _usernameController.value = TextEditingValue(
+        text: sanitized,
+        selection: TextSelection.collapsed(offset: sanitized.length),
+      );
+    }
+    _syncUsernameState();
+  }
+
+  void _syncUsernameState({bool immediate = false}) {
+    _usernameDebounce?.cancel();
+    final normalized = _normalizedUsername;
+
+    if (normalized.isEmpty) {
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = null;
+        _usernameAvailable = null;
+      });
+      return;
+    }
+
+    if (_usernameFormatError != null) {
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = null;
+      });
+      return;
+    }
+
+    if (normalized == _currentUsername) {
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = true;
+      });
+      return;
+    }
+
+    void runCheck() {
+      if (!mounted) return;
+      setState(() {
+        _checkingUsername = true;
+        _checkedUsername = normalized;
+        _usernameAvailable = null;
+      });
+      unawaited(_checkUsername(normalized));
+    }
+
+    if (immediate) {
+      runCheck();
+    } else {
+      _usernameDebounce = Timer(const Duration(milliseconds: 350), runCheck);
+      setState(() {});
+    }
+  }
+
+  Future<void> _checkUsername(String normalized) async {
+    final tokens = widget.getTokens();
+    if (tokens == null) return;
+
+    try {
+      final result = await widget.api.checkUsername(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        username: normalized,
+      );
+      if (!mounted || _normalizedUsername != normalized) return;
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = result.available;
+      });
+    } catch (error) {
+      if (!mounted || _normalizedUsername != normalized) return;
+      setState(() {
+        _checkingUsername = false;
+        _checkedUsername = normalized;
+        _usernameAvailable = null;
+      });
+      _showSnack(error.toString());
+    }
+  }
 
   Future<void> _save() async {
-    if (!_canContinue || _saving) return;
+    if (!_canContinue) return;
     final tokens = widget.getTokens();
     if (tokens == null) return;
 
@@ -69,7 +238,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       final updated = await widget.api.updateMe(
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
-        username: _normalizedUsername,
+        username: _usernameProvided ? _normalizedUsername : '',
         firstName: _firstNameController.text.trim(),
         lastName: _lastNameController.text.trim(),
       );
@@ -93,6 +262,13 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final identitySeed = widget.user.phone ?? widget.user.displayName;
+    final initial = identitySeed
+        .replaceAll('+', '')
+        .characters
+        .first
+        .toUpperCase();
+
     return Scaffold(
       body: DecoratedBox(
         decoration: BoxDecoration(
@@ -122,12 +298,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                           radius: context.sp(30),
                           backgroundColor: theme.colorScheme.primaryContainer,
                           child: Text(
-                            (widget.user.phone ?? widget.user.username)
-                                .replaceAll('+', '')
-                                .characters
-                                .take(1)
-                                .toString()
-                                .toUpperCase(),
+                            initial,
                             style: TextStyle(
                               fontSize: context.sp(24),
                               fontWeight: FontWeight.w700,
@@ -137,7 +308,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                         ),
                         SizedBox(height: context.sp(16)),
                         Text(
-                          'Finish profile setup',
+                          'Finish your profile',
                           style: TextStyle(
                             fontSize: context.sp(28),
                             fontWeight: FontWeight.w800,
@@ -146,7 +317,7 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                         ),
                         SizedBox(height: context.sp(8)),
                         Text(
-                          'Choose the name and username that other people will see when they search for you or open a chat.',
+                          'Your phone is the account key. First name is required. Public @username is optional and can be added later, like in Telegram.',
                           style: TextStyle(
                             fontSize: context.sp(15),
                             height: 1.45,
@@ -212,18 +383,23 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                         TextField(
                           controller: _usernameController,
                           autocorrect: false,
+                          textCapitalization: TextCapitalization.none,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'[A-Za-z0-9_@]'),
+                            ),
+                          ],
                           decoration: InputDecoration(
-                            labelText: 'Username',
+                            labelText: 'Public username (optional)',
                             prefixText: '@',
-                            prefixIcon: const Icon(Icons.alternate_email_rounded),
-                            helperText:
-                                '5-32 chars, start with a letter, then letters, numbers or underscore.',
-                            errorText: _usernameController.text.isEmpty ||
-                                    _usernameValid
-                                ? null
-                                : 'Invalid username format',
+                            prefixIcon: const Icon(
+                              Icons.alternate_email_rounded,
+                            ),
+                            helperText: _usernameHelperText,
+                            errorText: _usernameErrorText,
+                            suffixIcon: _usernameSuffix,
                           ),
-                          onChanged: (_) => setState(() {}),
+                          onChanged: _handleUsernameChanged,
                         ),
                         SizedBox(height: context.sp(18)),
                         Row(
@@ -237,15 +413,12 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
                             SizedBox(width: context.sp(10)),
                             Expanded(
                               child: FilledButton(
-                                onPressed: _canContinue && !_saving
-                                    ? _save
-                                    : null,
+                                onPressed: _canContinue ? _save : null,
                                 child: _saving
                                     ? SizedBox(
                                         width: context.sp(18),
                                         height: context.sp(18),
-                                        child:
-                                            const CircularProgressIndicator(
+                                        child: const CircularProgressIndicator(
                                           strokeWidth: 2,
                                         ),
                                       )

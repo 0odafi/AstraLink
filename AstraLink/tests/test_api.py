@@ -33,8 +33,6 @@ def _auth_by_phone(client, phone: str, first_name: str, last_name: str):
             "phone": request_payload["phone"],
             "code_token": request_payload["code_token"],
             "code": TEST_AUTH_CODE,
-            "first_name": first_name,
-            "last_name": last_name,
         },
     )
     assert verify_code.status_code == 200, verify_code.text
@@ -49,6 +47,14 @@ def _auth_by_phone(client, phone: str, first_name: str, last_name: str):
 def test_phone_auth_follow_up_login_does_not_require_profile_setup(client):
     phone = "+7 900 100 10 10"
     first = _auth_by_phone(client, phone, "Setup", "Needed")
+    headers = _auth_headers(first["access_token"])
+
+    complete_profile = client.patch(
+        "/api/users/me",
+        headers=headers,
+        json={"first_name": "Setup", "last_name": "Needed", "username": "setup_needed"},
+    )
+    assert complete_profile.status_code == 200, complete_profile.text
 
     request_code = client.post("/api/auth/request-code", json={"phone": phone})
     assert request_code.status_code == 200, request_code.text
@@ -78,16 +84,18 @@ def test_phone_auth_profile_and_lookup_flow(client):
 
     me = client.get("/api/users/me", headers=alice_headers)
     assert me.status_code == 200, me.text
-    assert me.json()["first_name"] == "Alice"
+    assert me.json()["first_name"] == ""
     assert me.json()["phone"] == "+79001112233"
+    assert me.json()["username"] is None
 
     patched = client.patch(
         "/api/users/me",
         headers=alice_headers,
-        json={"username": "alice_stone", "bio": "hello"},
+        json={"username": "@alice_stone", "first_name": "Alice", "last_name": "Stone", "bio": "hello"},
     )
     assert patched.status_code == 200, patched.text
     assert patched.json()["username"] == "alice_stone"
+    assert patched.json()["first_name"] == "Alice"
     assert patched.json()["bio"] == "hello"
 
     lookup = client.get("/api/users/lookup", headers=bob_headers, params={"q": "alice_stone"})
@@ -106,8 +114,21 @@ def test_private_chat_and_messages_flow(client):
     alice_headers = _auth_headers(alice["access_token"])
     bob_headers = _auth_headers(bob["access_token"])
 
+    alice_profile = client.patch(
+        "/api/users/me",
+        headers=alice_headers,
+        json={"first_name": "Alice", "last_name": "Two"},
+    )
+    assert alice_profile.status_code == 200, alice_profile.text
+    bob_profile = client.patch(
+        "/api/users/me",
+        headers=bob_headers,
+        json={"first_name": "Bob", "last_name": "Two", "username": "bob_two"},
+    )
+    assert bob_profile.status_code == 200, bob_profile.text
+
     open_chat = client.post(
-        f"/api/chats/private?query={quote_plus(bob['user']['username'])}",
+        "/api/chats/private?query=%2B79002222244",
         headers=alice_headers,
     )
     assert open_chat.status_code == 200, open_chat.text
@@ -147,16 +168,61 @@ def test_search_users_by_phone_and_username(client):
     alice = _auth_by_phone(client, "+7 900 333 22 33", "Alice", "Search")
     bob = _auth_by_phone(client, "+7 900 333 22 44", "Bob", "Search")
 
-    _ = alice
+    alice_headers = _auth_headers(alice["access_token"])
     bob_headers = _auth_headers(bob["access_token"])
+
+    set_username = client.patch(
+        "/api/users/me",
+        headers=alice_headers,
+        json={"first_name": "Alice", "last_name": "Search", "username": "alice_search"},
+    )
+    assert set_username.status_code == 200, set_username.text
 
     search_username = client.get("/api/users/search", headers=bob_headers, params={"q": "alice"})
     assert search_username.status_code == 200, search_username.text
-    assert any("alice" in user["username"] for user in search_username.json())
+    assert any(user["username"] == "alice_search" for user in search_username.json())
+
+    search_username_with_at = client.get("/api/users/search", headers=bob_headers, params={"q": "@alice"})
+    assert search_username_with_at.status_code == 200, search_username_with_at.text
 
     search_phone = client.get("/api/users/search", headers=bob_headers, params={"q": "9003332233"})
     assert search_phone.status_code == 200, search_phone.text
     assert any(user["phone"] == "+79003332233" for user in search_phone.json())
+
+
+def test_username_check_and_clear_flow(client):
+    user = _auth_by_phone(client, "+7 900 350 22 33", "Name", "User")
+    headers = _auth_headers(user["access_token"])
+
+    available = client.get("/api/users/username-check", headers=headers, params={"username": "@telegram_like"})
+    assert available.status_code == 200, available.text
+    assert available.json() == {"username": "telegram_like", "available": True}
+
+    updated = client.patch(
+        "/api/users/me",
+        headers=headers,
+        json={"username": "telegram_like", "first_name": "Name"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["username"] == "telegram_like"
+
+    taken = client.get("/api/users/username-check", headers=headers, params={"username": "telegram_like"})
+    assert taken.status_code == 200, taken.text
+    assert taken.json()["available"] is True
+
+    second = _auth_by_phone(client, "+7 900 350 22 44", "Second", "User")
+    second_headers = _auth_headers(second["access_token"])
+    unavailable = client.get("/api/users/username-check", headers=second_headers, params={"username": "telegram_like"})
+    assert unavailable.status_code == 200, unavailable.text
+    assert unavailable.json()["available"] is False
+
+    cleared = client.patch(
+        "/api/users/me",
+        headers=headers,
+        json={"username": "", "first_name": "Name"},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["username"] is None
 
 
 def test_realtime_message_status_flow(client):
@@ -164,9 +230,13 @@ def test_realtime_message_status_flow(client):
     bob = _auth_by_phone(client, "+7 900 444 22 44", "Bob", "Ws")
 
     alice_headers = _auth_headers(alice["access_token"])
+    bob_headers = _auth_headers(bob["access_token"])
+
+    client.patch("/api/users/me", headers=alice_headers, json={"first_name": "Alice", "last_name": "Ws"})
+    client.patch("/api/users/me", headers=bob_headers, json={"first_name": "Bob", "last_name": "Ws", "username": "bob_ws"})
 
     open_chat = client.post(
-        f"/api/chats/private?query={quote_plus(bob['user']['username'])}",
+        f"/api/chats/private?query={quote_plus('bob_ws')}",
         headers=alice_headers,
     )
     assert open_chat.status_code == 200, open_chat.text
@@ -207,9 +277,13 @@ def test_chat_state_and_message_search_flow(client):
     bob = _auth_by_phone(client, "+7 900 666 22 44", "Bob", "State")
 
     alice_headers = _auth_headers(alice["access_token"])
+    bob_headers = _auth_headers(bob["access_token"])
+
+    client.patch("/api/users/me", headers=alice_headers, json={"first_name": "Alice", "last_name": "State"})
+    client.patch("/api/users/me", headers=bob_headers, json={"first_name": "Bob", "last_name": "State", "username": "bob_state"})
 
     open_chat = client.post(
-        f"/api/chats/private?query={quote_plus(bob['user']['username'])}",
+        f"/api/chats/private?query={quote_plus('bob_state')}",
         headers=alice_headers,
     )
     assert open_chat.status_code == 200, open_chat.text
@@ -262,8 +336,11 @@ def test_realtime_replay_after_disconnect(client):
     alice_headers = _auth_headers(alice["access_token"])
     bob_headers = _auth_headers(bob["access_token"])
 
+    client.patch("/api/users/me", headers=alice_headers, json={"first_name": "Alice", "last_name": "Replay"})
+    client.patch("/api/users/me", headers=bob_headers, json={"first_name": "Bob", "last_name": "Replay", "username": "bob_replay"})
+
     open_chat = client.post(
-        f"/api/chats/private?query={quote_plus(bob['user']['username'])}",
+        f"/api/chats/private?query={quote_plus('bob_replay')}",
         headers=alice_headers,
     )
     assert open_chat.status_code == 200, open_chat.text

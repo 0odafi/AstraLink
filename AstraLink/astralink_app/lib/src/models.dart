@@ -1,6 +1,6 @@
 class AppUser {
   final int id;
-  final String username;
+  final String? username;
   final String? phone;
   final String firstName;
   final String lastName;
@@ -23,23 +23,33 @@ class AppUser {
       lastName,
     ].where((part) => part.trim().isNotEmpty).join(' ').trim();
     if (full.isNotEmpty) return full;
-    return username;
+    final handle = username?.trim();
+    if (handle != null && handle.isNotEmpty) return handle;
+    final phoneValue = phone?.trim();
+    if (phoneValue != null && phoneValue.isNotEmpty) return phoneValue;
+    return 'Unknown User';
   }
 
   bool get hasProfileName => firstName.trim().isNotEmpty;
 
   bool get usernameLooksGenerated {
-    final normalized = username.trim().toLowerCase();
+    final normalized = (username ?? '').trim().toLowerCase();
     final digitsOnlyTail = normalized.replaceFirst(RegExp(r'^user'), '');
     return normalized.startsWith('user') &&
         digitsOnlyTail.isNotEmpty &&
         RegExp(r'^[0-9]+$').hasMatch(digitsOnlyTail);
   }
 
+  String? get publicHandle {
+    final value = username?.trim();
+    if (value == null || value.isEmpty) return null;
+    return '@$value';
+  }
+
   factory AppUser.fromJson(Map<String, dynamic> json) {
     return AppUser(
       id: json['id'] as int,
-      username: (json['username'] ?? '').toString(),
+      username: json['username']?.toString(),
       phone: json['phone']?.toString(),
       firstName: (json['first_name'] ?? '').toString(),
       lastName: (json['last_name'] ?? '').toString(),
@@ -87,6 +97,20 @@ class PhoneCodeSession {
       codeToken: (json['code_token'] ?? '').toString(),
       expiresInSeconds: (json['expires_in_seconds'] ?? 0) as int,
       isRegistered: (json['is_registered'] ?? false) as bool,
+    );
+  }
+}
+
+class UsernameCheckResult {
+  final String username;
+  final bool available;
+
+  const UsernameCheckResult({required this.username, required this.available});
+
+  factory UsernameCheckResult.fromJson(Map<String, dynamic> json) {
+    return UsernameCheckResult(
+      username: (json['username'] ?? '').toString(),
+      available: (json['available'] ?? false) == true,
     );
   }
 }

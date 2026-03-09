@@ -1,4 +1,5 @@
 import hashlib
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -22,6 +23,7 @@ from app.schemas.auth import (
 )
 from app.schemas.user import UserPublic
 from app.services.user_service import (
+    USERNAME_RULES_MESSAGE,
     is_probable_phone,
     normalize_phone,
     normalize_username,
@@ -42,36 +44,12 @@ def _code_hash(phone: str, code: str) -> str:
     return hashlib.sha256(f"{phone}:{code}".encode("utf-8")).hexdigest()
 
 
-def _synthetic_email(username: str) -> str:
+def _synthetic_email(seed: str) -> str:
     token = secrets.token_hex(4)
-    return f"{username}.{token}@phone.astralink.local"
-
-
-def _build_username_seed(phone: str, first_name: str | None) -> str:
-    if first_name:
-        normalized = normalize_username(first_name)
-        if validate_username(normalized):
-            return normalized
-    tail = "".join(char for char in phone if char.isdigit())[-6:]
-    return f"user{tail}"
-
-
-def _ensure_unique_username(db: Session, seed: str) -> str:
-    base = normalize_username(seed)
-    if not validate_username(base):
-        base = "user00000"
-
-    candidate = base
-    suffix = 0
-    while True:
-        existing = db.scalar(select(User).where(User.username == candidate))
-        if not existing:
-            return candidate
-        suffix += 1
-        suffix_text = str(suffix)
-        keep = max(5, 32 - len(suffix_text))
-        trimmed = base[:keep]
-        candidate = f"{trimmed}{suffix_text}"
+    safe_seed = re.sub(r"[^a-z0-9]+", "", normalize_username(seed))
+    if not safe_seed:
+        safe_seed = f"user{secrets.token_hex(2)}"
+    return f"{safe_seed}.{token}@phone.astralink.local"
 
 
 def _cleanup_phone_codes(db: Session, now: datetime) -> None:
@@ -173,14 +151,12 @@ def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> tup
     if user is None:
         first_name = (payload.first_name or "").strip()
         last_name = (payload.last_name or "").strip()
-        username_seed = _build_username_seed(normalized_phone, first_name)
-        username = _ensure_unique_username(db, username_seed)
         user = User(
-            username=username,
+            username=None,
             phone=normalized_phone,
             first_name=first_name,
             last_name=last_name,
-            email=_synthetic_email(username),
+            email=_synthetic_email(normalized_phone),
             password_hash=hash_password(generate_refresh_token()),
         )
         db.add(user)
@@ -201,14 +177,18 @@ def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> tup
 
 
 def register_user(db: Session, payload: RegisterRequest) -> User:
+    normalized_username = normalize_username(payload.username)
+    if not validate_username(normalized_username):
+        raise ValueError(USERNAME_RULES_MESSAGE)
+
     existing = db.scalar(
-        select(User).where(or_(User.username == payload.username, User.email == payload.email))
+        select(User).where(or_(User.username == normalized_username, User.email == payload.email))
     )
     if existing:
         raise ValueError("Username or email already exists")
 
     user = User(
-        username=normalize_username(payload.username),
+        username=normalized_username,
         email=payload.email,
         password_hash=hash_password(payload.password),
     )

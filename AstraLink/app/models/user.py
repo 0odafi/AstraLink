@@ -14,7 +14,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    username: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    username: Mapped[str | None] = mapped_column(String(40), unique=True, index=True, nullable=True)
     uid: Mapped[str | None] = mapped_column(String(40), unique=True, index=True, nullable=True)
     phone: Mapped[str | None] = mapped_column(String(24), unique=True, index=True, nullable=True)
     first_name: Mapped[str] = mapped_column(String(80), default="", nullable=False)

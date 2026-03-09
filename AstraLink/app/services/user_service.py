@@ -6,10 +6,13 @@ from sqlalchemy.orm import Session
 from app.models.user import User
 
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
+USERNAME_RULES_MESSAGE = (
+    "Username format: 5-32 chars, start with a letter, use letters, numbers or underscore"
+)
 
 
 def normalize_username(value: str) -> str:
-    return value.strip().lower()
+    return value.strip().lstrip("@").lower()
 
 
 def validate_username(value: str) -> bool:
@@ -46,7 +49,10 @@ def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
     if not cleaned_query:
         return []
 
-    pattern = f"%{cleaned_query.lower()}%"
+    normalized_username_query = normalize_username(cleaned_query)
+    display_query = cleaned_query.lower().lstrip("@")
+    pattern = f"%{display_query}%"
+    username_pattern = f"%{normalized_username_query}%"
     phone_pattern = _phone_search_pattern(cleaned_query)
     phone_expression = (
         User.phone.ilike(phone_pattern)
@@ -58,13 +64,13 @@ def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
         select(User)
         .where(
             or_(
-                User.username.ilike(pattern),
+                User.username.ilike(username_pattern),
                 User.first_name.ilike(pattern),
                 User.last_name.ilike(pattern),
                 phone_expression,
             )
         )
-        .order_by(User.username.asc())
+        .order_by(User.username.is_(None), User.username.asc(), User.first_name.asc(), User.id.asc())
         .limit(limit)
     )
     return list(db.scalars(statement).all())
@@ -85,6 +91,8 @@ def find_user_by_phone_or_username(db: Session, query: str) -> User | None:
             pass
 
     normalized_username = normalize_username(cleaned_query)
+    if not normalized_username:
+        return None
     return db.scalar(select(User).where(User.username == normalized_username))
 
 

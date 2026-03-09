@@ -24,6 +24,15 @@ from app.schemas.chat import ChatCreate, MessageAttachmentOut, MessageOut, Messa
 from app.services.user_service import find_user_by_phone_or_username
 
 
+def _user_public_label(user: User | None, fallback: str = "Unknown User") -> str:
+    if user is None:
+        return fallback
+    full_name = " ".join(
+        part.strip() for part in [user.first_name, user.last_name] if part and part.strip()
+    ).strip()
+    return full_name or user.username or user.phone or fallback
+
+
 def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
     if payload.type.value == "private":
         if len(payload.member_ids) != 1:
@@ -38,7 +47,7 @@ def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
         existing_private = _find_private_chat_between(db, owner_id=owner_id, peer_id=target_user_id)
         if existing_private:
             return existing_private
-        title = target_user.username
+        title = _user_public_label(target_user)
     else:
         title = payload.title
 
@@ -86,7 +95,7 @@ def create_or_get_private_chat(db: Session, owner_id: int, query: str) -> Chat:
     if not target_user:
         raise ValueError("User not found")
     payload = ChatCreate(
-        title=target_user.username,
+        title=_user_public_label(target_user),
         description="",
         type=ChatType.PRIVATE,
         member_ids=[target_user.id],
@@ -111,7 +120,7 @@ def _private_chat_display_name(db: Session, chat_id: int, user_id: int, fallback
     peer_name = " ".join(
         part for part in [peer_user.first_name, peer_user.last_name] if part
     ).strip()
-    return peer_name or peer_user.username or fallback
+    return peer_name or peer_user.username or peer_user.phone or fallback
 
 
 def get_user_chats(

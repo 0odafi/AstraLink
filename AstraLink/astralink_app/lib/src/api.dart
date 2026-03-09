@@ -141,6 +141,20 @@ class AstraApi {
     return AppUser.fromJson(_jsonMap(response));
   }
 
+  Future<UsernameCheckResult> checkUsername({
+    required String accessToken,
+    String? refreshToken,
+    required String username,
+  }) async {
+    final response = await _authorizedRequest(
+      'GET',
+      '/api/users/username-check?username=${Uri.encodeQueryComponent(username)}',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return UsernameCheckResult.fromJson(_jsonMap(response));
+  }
+
   Future<List<ChatItem>> listChats({
     required String accessToken,
     String? refreshToken,

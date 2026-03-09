@@ -264,8 +264,8 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
             controller: controller,
             autofocus: true,
             decoration: const InputDecoration(
-              labelText: 'Phone or username',
-              hintText: '+7900... or username',
+              labelText: 'Phone or @username',
+              hintText: '+7900... or @username',
             ),
           ),
           actions: [
@@ -344,7 +344,7 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
             TextField(
               controller: _searchController,
               decoration: const InputDecoration(
-                hintText: 'Search chats, usernames, phone',
+                hintText: 'Search chats, @usernames, phone',
                 prefixIcon: Icon(Icons.search_rounded),
               ),
               onChanged: (_) {
