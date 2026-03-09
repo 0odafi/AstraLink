@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../api.dart';
 import '../../../core/realtime/realtime_cursor_store.dart';
@@ -768,6 +772,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   int _realtimeCursor = 0;
   int? _replyToMessageId;
   int? _editingMessageId;
+  int _attachmentSeed = 0;
+  List<_PendingComposerAttachment> _pendingAttachments =
+      const <_PendingComposerAttachment>[];
 
   @override
   void initState() {
@@ -800,6 +807,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _messageController.clear();
       _replyToMessageId = null;
       _editingMessageId = null;
+      _pendingAttachments = const <_PendingComposerAttachment>[];
       unawaited(_loadDraft());
       unawaited(_bootstrapRealtime());
     }
@@ -860,6 +868,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   bool get _sending {
     return ref.read(chatThreadViewModelProvider(_threadArgs)).sending;
+  }
+
+  bool get _hasUploadingAttachments {
+    return _pendingAttachments.any((item) => item.isUploading);
+  }
+
+  bool get _hasFailedAttachments {
+    return _pendingAttachments.any((item) => item.errorMessage != null);
+  }
+
+  List<int> get _readyAttachmentIds {
+    return _pendingAttachments
+        .map((item) => item.uploadedAttachment?.id)
+        .whereType<int>()
+        .toList();
+  }
+
+  bool get _canSend {
+    final hasPayload = _editingMessageId != null
+        ? _messageController.text.trim().isNotEmpty
+        : (_messageController.text.trim().isNotEmpty ||
+              _readyAttachmentIds.isNotEmpty);
+    return hasPayload &&
+        !_sending &&
+        !_hasUploadingAttachments &&
+        !_hasFailedAttachments;
   }
 
   MessageItem? _messageById(int messageId) {
@@ -1089,16 +1123,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty || _sending) return;
+    if (!_canSend) return;
     final vm = ref.read(chatThreadViewModelProvider(_threadArgs));
     final error = _editingMessageId != null
         ? await vm.editMessage(messageId: _editingMessageId!, text: text)
-        : await vm.sendMessage(text, replyToMessageId: _replyToMessageId);
+        : await vm.sendMessage(
+            text,
+            replyToMessageId: _replyToMessageId,
+            attachmentIds: _readyAttachmentIds,
+          );
     if (error == null) {
       _messageController.clear();
       _notifyTypingStopped();
       await _clearDraft();
       _clearComposerMode();
+      if (mounted) {
+        setState(() {
+          _pendingAttachments = const <_PendingComposerAttachment>[];
+        });
+      }
       _scrollToBottom();
       if (mounted) setState(() {});
       return;
@@ -1126,6 +1169,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     setState(() {
       _editingMessageId = message.id;
       _replyToMessageId = null;
+      _pendingAttachments = const <_PendingComposerAttachment>[];
     });
     _messageController.text = message.content;
     _messageController.selection = TextSelection.collapsed(
@@ -1233,6 +1277,119 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         );
       },
     );
+  }
+
+  Future<void> _pickAttachments() async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: kIsWeb,
+    );
+    if (result == null || result.files.isEmpty || !mounted) return;
+
+    final selected = result.files.map((file) {
+      final localId = ++_attachmentSeed;
+      return _PendingComposerAttachment.fromPlatformFile(
+        localId: localId,
+        file: file,
+      );
+    }).toList();
+
+    setState(() {
+      _pendingAttachments = [..._pendingAttachments, ...selected];
+    });
+
+    for (final item in selected) {
+      unawaited(_uploadAttachment(item.localId));
+    }
+  }
+
+  Future<void> _uploadAttachment(int localId) async {
+    final tokens = widget.getTokens();
+    if (tokens == null) {
+      _updatePendingAttachment(
+        localId,
+        (item) => item.copyWith(
+          isUploading: false,
+          errorMessage: 'Session expired',
+        ),
+      );
+      return;
+    }
+
+    final current = _pendingAttachments.where((item) => item.localId == localId);
+    if (current.isEmpty) return;
+
+    _updatePendingAttachment(
+      localId,
+      (item) => item.copyWith(isUploading: true, errorMessage: null),
+    );
+
+    final item = current.first;
+    try {
+      final uploaded = await widget.api.uploadChatMedia(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: widget.chat.id,
+        fileName: item.name,
+        filePath: item.filePath,
+        bytes: item.bytes,
+      );
+      _updatePendingAttachment(
+        localId,
+        (pending) => pending.copyWith(
+          isUploading: false,
+          uploadedAttachment: uploaded,
+          errorMessage: null,
+        ),
+      );
+    } catch (error) {
+      _updatePendingAttachment(
+        localId,
+        (pending) => pending.copyWith(
+          isUploading: false,
+          errorMessage: error.toString(),
+        ),
+      );
+    }
+  }
+
+  void _updatePendingAttachment(
+    int localId,
+    _PendingComposerAttachment Function(_PendingComposerAttachment current)
+    transform,
+  ) {
+    if (!mounted) return;
+    setState(() {
+      _pendingAttachments = _pendingAttachments.map((item) {
+        if (item.localId != localId) return item;
+        return transform(item);
+      }).toList();
+    });
+  }
+
+  void _removePendingAttachment(int localId) {
+    if (!mounted) return;
+    setState(() {
+      _pendingAttachments = _pendingAttachments
+          .where((item) => item.localId != localId)
+          .toList();
+    });
+  }
+
+  Future<void> _retryAttachment(_PendingComposerAttachment item) async {
+    await _uploadAttachment(item.localId);
+  }
+
+  Future<void> _openAttachment(MessageAttachmentItem attachment) async {
+    final uri = Uri.tryParse(widget.api.resolveUrl(attachment.url));
+    if (uri == null) {
+      _showSnack('Attachment URL is invalid');
+      return;
+    }
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened) {
+      _showSnack('Could not open attachment');
+    }
   }
 
   void _onScroll() {
@@ -1444,6 +1601,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           mine: mine,
                           appearance: appearance,
                           onLongPress: () => _showMessageActions(message),
+                          attachmentUrlBuilder: widget.api.resolveUrl,
+                          onAttachmentTap: _openAttachment,
                         );
                       },
                     ),
@@ -1531,6 +1690,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           ],
                         ),
                       ),
+                    if (_pendingAttachments.isNotEmpty)
+                      Padding(
+                        padding: EdgeInsets.only(bottom: context.sp(8)),
+                        child: SizedBox(
+                          height: context.sp(84),
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: _pendingAttachments.length,
+                            separatorBuilder: (context, index) =>
+                                SizedBox(width: context.sp(8)),
+                            itemBuilder: (context, index) {
+                              final attachment = _pendingAttachments[index];
+                              return _PendingAttachmentChip(
+                                attachment: attachment,
+                                appearance: appearance,
+                                resolveUrl: widget.api.resolveUrl,
+                                onRemove: () =>
+                                    _removePendingAttachment(attachment.localId),
+                                onRetry: attachment.isUploading
+                                    ? null
+                                    : () => _retryAttachment(attachment),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
                     if (_messageController.text.trim().isNotEmpty)
                       Padding(
                         padding: EdgeInsets.only(bottom: context.sp(6)),
@@ -1546,6 +1731,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                       ),
                     Row(
                       children: [
+                        IconButton.filledTonal(
+                          tooltip: 'Attach files',
+                          onPressed: _editingMessageId == null
+                              ? _pickAttachments
+                              : null,
+                          icon: const Icon(Icons.attach_file_rounded),
+                        ),
+                        SizedBox(width: context.sp(8)),
                         Expanded(
                           child: TextField(
                             controller: _messageController,
@@ -1562,11 +1755,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         ),
                         SizedBox(width: context.sp(8)),
                         FilledButton(
-                          onPressed:
-                              _messageController.text.trim().isNotEmpty &&
-                                  !vm.sending
-                              ? _sendMessage
-                              : null,
+                          onPressed: _canSend ? _sendMessage : null,
                           child: vm.sending
                               ? SizedBox(
                                   width: context.sp(16),
@@ -1590,12 +1779,154 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 }
 
+class _PendingAttachmentChip extends StatelessWidget {
+  final _PendingComposerAttachment attachment;
+  final AppAppearanceData appearance;
+  final String Function(String pathOrUrl) resolveUrl;
+  final VoidCallback onRemove;
+  final VoidCallback? onRetry;
+
+  const _PendingAttachmentChip({
+    required this.attachment,
+    required this.appearance,
+    required this.resolveUrl,
+    required this.onRemove,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final uploaded = attachment.uploadedAttachment;
+    final previewUrl = uploaded == null ? null : resolveUrl(uploaded.url);
+    return Container(
+      width: context.sp(140),
+      padding: EdgeInsets.all(context.sp(8)),
+      decoration: BoxDecoration(
+        color: appearance.surfaceRaisedColor,
+        borderRadius: BorderRadius.circular(context.sp(16)),
+        border: Border.all(
+          color: attachment.errorMessage != null
+              ? Theme.of(context).colorScheme.error
+              : appearance.outlineColor,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(context.sp(12)),
+              child: Container(
+                width: double.infinity,
+                color: Colors.black.withValues(alpha: 0.08),
+                child: uploaded?.isImage == true && previewUrl != null
+                    ? Image.network(
+                        previewUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) =>
+                            _PendingAttachmentPlaceholder(
+                              attachment: attachment,
+                            ),
+                      )
+                    : _PendingAttachmentPlaceholder(attachment: attachment),
+              ),
+            ),
+          ),
+          SizedBox(height: context.sp(8)),
+          Text(
+            attachment.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: context.sp(12),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          SizedBox(height: context.sp(2)),
+          Text(
+            attachment.errorMessage ??
+                (attachment.isUploading
+                    ? 'Uploading...'
+                    : uploaded != null
+                    ? _formatBytes(uploaded.sizeBytes)
+                    : _formatBytes(attachment.sizeBytes)),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: context.sp(10),
+              color: attachment.errorMessage != null
+                  ? Theme.of(context).colorScheme.error
+                  : Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          SizedBox(height: context.sp(4)),
+          Row(
+            children: [
+              if (attachment.errorMessage != null && onRetry != null)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Retry upload',
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded),
+                )
+              else if (attachment.isUploading)
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: context.sp(8)),
+                  child: SizedBox(
+                    width: context.sp(16),
+                    height: context.sp(16),
+                    child: const CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              else
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: context.sp(8)),
+                  child: Icon(
+                    Icons.check_circle_rounded,
+                    size: context.sp(18),
+                    color: appearance.accentColor,
+                  ),
+                ),
+              const Spacer(),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Remove',
+                onPressed: onRemove,
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PendingAttachmentPlaceholder extends StatelessWidget {
+  final _PendingComposerAttachment attachment;
+
+  const _PendingAttachmentPlaceholder({required this.attachment});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Icon(
+        attachment.isImage ? Icons.image_outlined : Icons.attach_file_rounded,
+        size: context.sp(26),
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
   final MessageItem message;
   final MessageItem? repliedMessage;
   final bool mine;
   final AppAppearanceData appearance;
   final VoidCallback? onLongPress;
+  final String Function(String pathOrUrl) attachmentUrlBuilder;
+  final Future<void> Function(MessageAttachmentItem attachment)? onAttachmentTap;
 
   const _MessageBubble({
     required this.message,
@@ -1603,6 +1934,8 @@ class _MessageBubble extends StatelessWidget {
     required this.mine,
     required this.appearance,
     this.onLongPress,
+    required this.attachmentUrlBuilder,
+    this.onAttachmentTap,
   });
 
   @override
@@ -1698,42 +2031,103 @@ class _MessageBubble extends StatelessWidget {
                     child: Column(
                       children: message.attachments
                           .map(
-                            (attachment) => Container(
-                              width: double.infinity,
-                              margin: EdgeInsets.only(bottom: context.sp(6)),
-                              padding: EdgeInsets.symmetric(
-                                horizontal: context.sp(10),
-                                vertical: context.sp(8),
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.08),
+                            (attachment) => Padding(
+                              padding: EdgeInsets.only(bottom: context.sp(6)),
+                              child: InkWell(
                                 borderRadius: BorderRadius.circular(
                                   context.sp(12),
                                 ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    attachment.isImage
-                                        ? Icons.image_outlined
-                                        : Icons.attach_file_rounded,
-                                    size: context.sp(18),
-                                    color: attachmentColor,
+                                onTap: onAttachmentTap == null
+                                    ? null
+                                    : () => onAttachmentTap!(attachment),
+                                child: Container(
+                                  width: double.infinity,
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: context.sp(10),
+                                    vertical: context.sp(8),
                                   ),
-                                  SizedBox(width: context.sp(8)),
-                                  Expanded(
-                                    child: Text(
-                                      attachment.fileName,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize:
-                                            context.sp(13) *
-                                            appearance.messageTextScale,
-                                      ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.08),
+                                    borderRadius: BorderRadius.circular(
+                                      context.sp(12),
                                     ),
                                   ),
-                                ],
+                                  child: attachment.isImage
+                                      ? Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(
+                                                    context.sp(10),
+                                                  ),
+                                              child: Image.network(
+                                                attachmentUrlBuilder(
+                                                  attachment.url,
+                                                ),
+                                                height: context.sp(140),
+                                                width: double.infinity,
+                                                fit: BoxFit.cover,
+                                                errorBuilder:
+                                                    (
+                                                      context,
+                                                      error,
+                                                      stackTrace,
+                                                    ) => Container(
+                                                      height: context.sp(140),
+                                                      color: Colors.black
+                                                          .withValues(
+                                                            alpha: 0.08,
+                                                          ),
+                                                      alignment:
+                                                          Alignment.center,
+                                                      child: Icon(
+                                                        Icons
+                                                            .broken_image_outlined,
+                                                        size: context.sp(28),
+                                                        color: attachmentColor,
+                                                      ),
+                                                    ),
+                                              ),
+                                            ),
+                                            SizedBox(height: context.sp(8)),
+                                            Text(
+                                              attachment.fileName,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize:
+                                                    context.sp(13) *
+                                                    appearance.messageTextScale,
+                                              ),
+                                            ),
+                                          ],
+                                        )
+                                      : Row(
+                                          children: [
+                                            Icon(
+                                              Icons.attach_file_rounded,
+                                              size: context.sp(18),
+                                              color: attachmentColor,
+                                            ),
+                                            SizedBox(width: context.sp(8)),
+                                            Expanded(
+                                              child: Text(
+                                                attachment.fileName,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  fontSize:
+                                                      context.sp(13) *
+                                                      appearance
+                                                          .messageTextScale,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                ),
                               ),
                             ),
                           )
@@ -1828,4 +2222,95 @@ class _MessageBubble extends StatelessWidget {
         return '';
     }
   }
+}
+
+class _PendingComposerAttachment {
+  final int localId;
+  final String name;
+  final int sizeBytes;
+  final bool isImage;
+  final String? filePath;
+  final Uint8List? bytes;
+  final bool isUploading;
+  final String? errorMessage;
+  final MessageAttachmentItem? uploadedAttachment;
+
+  const _PendingComposerAttachment({
+    required this.localId,
+    required this.name,
+    required this.sizeBytes,
+    required this.isImage,
+    required this.filePath,
+    required this.bytes,
+    required this.isUploading,
+    required this.errorMessage,
+    required this.uploadedAttachment,
+  });
+
+  factory _PendingComposerAttachment.fromPlatformFile({
+    required int localId,
+    required PlatformFile file,
+  }) {
+    final lowerName = file.name.toLowerCase();
+    return _PendingComposerAttachment(
+      localId: localId,
+      name: file.name,
+      sizeBytes: file.size,
+      isImage:
+          lowerName.endsWith('.png') ||
+          lowerName.endsWith('.jpg') ||
+          lowerName.endsWith('.jpeg') ||
+          lowerName.endsWith('.gif') ||
+          lowerName.endsWith('.webp'),
+      filePath: file.path,
+      bytes: file.bytes,
+      isUploading: true,
+      errorMessage: null,
+      uploadedAttachment: null,
+    );
+  }
+
+  _PendingComposerAttachment copyWith({
+    int? localId,
+    String? name,
+    int? sizeBytes,
+    bool? isImage,
+    Object? filePath = _pendingAttachmentSentinel,
+    Object? bytes = _pendingAttachmentSentinel,
+    bool? isUploading,
+    Object? errorMessage = _pendingAttachmentSentinel,
+    Object? uploadedAttachment = _pendingAttachmentSentinel,
+  }) {
+    return _PendingComposerAttachment(
+      localId: localId ?? this.localId,
+      name: name ?? this.name,
+      sizeBytes: sizeBytes ?? this.sizeBytes,
+      isImage: isImage ?? this.isImage,
+      filePath: filePath == _pendingAttachmentSentinel
+          ? this.filePath
+          : filePath as String?,
+      bytes: bytes == _pendingAttachmentSentinel
+          ? this.bytes
+          : bytes as Uint8List?,
+      isUploading: isUploading ?? this.isUploading,
+      errorMessage: errorMessage == _pendingAttachmentSentinel
+          ? this.errorMessage
+          : errorMessage as String?,
+      uploadedAttachment: uploadedAttachment == _pendingAttachmentSentinel
+          ? this.uploadedAttachment
+          : uploadedAttachment as MessageAttachmentItem?,
+    );
+  }
+}
+
+const Object _pendingAttachmentSentinel = Object();
+
+String _formatBytes(int bytes) {
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  if (bytes >= 1024) {
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+  return '$bytes B';
 }

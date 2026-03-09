@@ -315,9 +315,13 @@ class ChatThreadViewModel extends ChangeNotifier {
     }
   }
 
-  Future<String?> sendMessage(String text, {int? replyToMessageId}) async {
+  Future<String?> sendMessage(
+    String text, {
+    int? replyToMessageId,
+    List<int> attachmentIds = const [],
+  }) async {
     final cleaned = text.trim();
-    if (cleaned.isEmpty || sending) return null;
+    if ((cleaned.isEmpty && attachmentIds.isEmpty) || sending) return null;
     final tokens = _getTokens();
     if (tokens == null) return 'Session expired';
 
@@ -330,6 +334,7 @@ class ChatThreadViewModel extends ChangeNotifier {
         chatId: _chatId,
         content: cleaned,
         replyToMessageId: replyToMessageId,
+        attachmentIds: attachmentIds,
       );
       applyUpdatedMessage(sent);
       return null;

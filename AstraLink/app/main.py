@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.api.routers import auth, chats, public, realtime, releases, users
+from app.api.routers import auth, chats, media, public, realtime, releases, users
 from app.core.config import get_settings
 from app.core.migrations import run_migrations
 from app.realtime.fanout import realtime_fanout
@@ -62,6 +62,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(public.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
+app.include_router(media.router, prefix="/api")
 app.include_router(releases.router, prefix="/api")
 app.include_router(realtime.router, prefix="/api/realtime")
 

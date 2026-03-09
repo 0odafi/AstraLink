@@ -38,6 +38,19 @@ String webSocketBase(String baseUrl) {
   return 'wss://$baseUrl';
 }
 
+String resolveApiUrl(String baseUrl, String pathOrUrl) {
+  final trimmed = pathOrUrl.trim();
+  if (trimmed.isEmpty) return normalizeBaseUrl(baseUrl);
+  final parsed = Uri.tryParse(trimmed);
+  if (parsed != null && parsed.hasScheme) return trimmed;
+
+  final normalizedBase = normalizeBaseUrl(baseUrl);
+  if (trimmed.startsWith('/')) {
+    return '$normalizedBase$trimmed';
+  }
+  return '$normalizedBase/$trimmed';
+}
+
 String normalizePublicUsername(String value) {
   return value.trim().replaceFirst(RegExp(r'^@+'), '').toLowerCase();
 }
@@ -93,6 +106,10 @@ class AstraApi {
     return uri
         .replace(path: '/u/$normalized', queryParameters: null, fragment: null)
         .toString();
+  }
+
+  String resolveUrl(String pathOrUrl) {
+    return resolveApiUrl(baseUrl, pathOrUrl);
   }
 
   Future<PhoneCodeSession> requestPhoneCode(String phone) async {
@@ -301,10 +318,14 @@ class AstraApi {
     required int chatId,
     required String content,
     int? replyToMessageId,
+    List<int> attachmentIds = const [],
   }) async {
     final payload = <String, dynamic>{'content': content};
     if (replyToMessageId != null) {
       payload['reply_to_message_id'] = replyToMessageId;
+    }
+    if (attachmentIds.isNotEmpty) {
+      payload['attachment_ids'] = attachmentIds;
     }
     final response = await _authorizedRequest(
       'POST',
@@ -373,6 +394,46 @@ class AstraApi {
       accessToken: accessToken,
       refreshToken: refreshToken,
     );
+  }
+
+  Future<MessageAttachmentItem> uploadChatMedia({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    required String fileName,
+    String? filePath,
+    Uint8List? bytes,
+  }) async {
+    final firstTry = await _uploadChatMediaRequest(
+      accessToken: accessToken,
+      chatId: chatId,
+      fileName: fileName,
+      filePath: filePath,
+      bytes: bytes,
+    );
+    if (firstTry.statusCode != 401) {
+      return MessageAttachmentItem.fromJson(_jsonMap(firstTry));
+    }
+
+    if (refreshToken == null ||
+        refreshToken.isEmpty ||
+        onRefreshToken == null) {
+      throw const ApiException('Session expired', statusCode: 401);
+    }
+
+    final nextTokens = await onRefreshToken!.call(refreshToken);
+    if (nextTokens == null) {
+      throw const ApiException('Session expired', statusCode: 401);
+    }
+
+    final retried = await _uploadChatMediaRequest(
+      accessToken: nextTokens.accessToken,
+      chatId: chatId,
+      fileName: fileName,
+      filePath: filePath,
+      bytes: bytes,
+    );
+    return MessageAttachmentItem.fromJson(_jsonMap(retried));
   }
 
   Future<List<AppUser>> searchUsers({
@@ -473,6 +534,52 @@ class AstraApi {
       path,
       body: body,
       headers: {'Authorization': 'Bearer ${nextTokens.accessToken}'},
+    );
+  }
+
+  Future<http.Response> _uploadChatMediaRequest({
+    required String accessToken,
+    required int chatId,
+    required String fileName,
+    String? filePath,
+    Uint8List? bytes,
+  }) async {
+    http.MultipartFile multipartFile;
+    if (!kIsWeb && filePath != null && filePath.trim().isNotEmpty) {
+      multipartFile = await http.MultipartFile.fromPath(
+        'file',
+        filePath,
+        filename: fileName,
+      );
+    } else if (bytes != null) {
+      multipartFile = http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: fileName,
+      );
+    } else {
+      throw const ApiException('Selected file is unavailable');
+    }
+
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$baseUrl/api/media/upload?chat_id=$chatId'),
+    )
+      ..headers['Accept'] = 'application/json'
+      ..headers['Authorization'] = 'Bearer $accessToken'
+      ..files.add(multipartFile);
+
+    final streamed = await request.send();
+    final response = await http.Response.fromStream(streamed);
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return response;
+    }
+    if (response.statusCode == 401) {
+      return response;
+    }
+    throw ApiException(
+      _extractErrorMessage(response),
+      statusCode: response.statusCode,
     );
   }
 

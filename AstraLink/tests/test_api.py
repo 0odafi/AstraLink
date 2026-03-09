@@ -369,9 +369,54 @@ def test_chat_state_and_message_search_flow(client):
     assert any(row["chat_id"] == chat_id for row in search.json())
 
 
+def test_media_upload_and_send_attachment_flow(client):
+    alice = _auth_by_phone(client, "+7 900 777 22 33", "Alice", "Media")
+    bob = _auth_by_phone(client, "+7 900 777 22 44", "Bob", "Media")
+
+    alice_headers = _auth_headers(alice["access_token"])
+    bob_headers = _auth_headers(bob["access_token"])
+
+    client.patch("/api/users/me", headers=alice_headers, json={"first_name": "Alice", "last_name": "Media"})
+    client.patch("/api/users/me", headers=bob_headers, json={"first_name": "Bob", "last_name": "Media", "username": "bob_media"})
+
+    open_chat = client.post(
+        f"/api/chats/private?query={quote_plus('bob_media')}",
+        headers=alice_headers,
+    )
+    assert open_chat.status_code == 200, open_chat.text
+    chat_id = open_chat.json()["id"]
+
+    upload = client.post(
+        f"/api/media/upload?chat_id={chat_id}",
+        headers=alice_headers,
+        files={"file": ("cover.png", b"fake-image-bytes", "image/png")},
+    )
+    assert upload.status_code == 201, upload.text
+    upload_payload = upload.json()
+    assert upload_payload["id"] > 0
+    assert upload_payload["is_image"] is True
+    assert upload_payload["url"].startswith("/media/")
+
+    sent = client.post(
+        f"/api/chats/{chat_id}/messages",
+        headers=alice_headers,
+        json={"content": "", "attachment_ids": [upload_payload["id"]]},
+    )
+    assert sent.status_code == 201, sent.text
+    message = sent.json()
+    assert message["content"] == ""
+    assert len(message["attachments"]) == 1
+    assert message["attachments"][0]["id"] == upload_payload["id"]
+    assert message["attachments"][0]["is_image"] is True
+
+    history = client.get(f"/api/chats/{chat_id}/messages", headers=bob_headers)
+    assert history.status_code == 200, history.text
+    assert any(item["id"] == message["id"] and item["attachments"] for item in history.json())
+
+
 def test_realtime_replay_after_disconnect(client):
-    alice = _auth_by_phone(client, "+7 900 777 22 33", "Alice", "Replay")
-    bob = _auth_by_phone(client, "+7 900 777 22 44", "Bob", "Replay")
+    alice = _auth_by_phone(client, "+7 900 778 22 33", "Alice", "Replay")
+    bob = _auth_by_phone(client, "+7 900 778 22 44", "Bob", "Replay")
 
     alice_headers = _auth_headers(alice["access_token"])
     bob_headers = _auth_headers(bob["access_token"])
