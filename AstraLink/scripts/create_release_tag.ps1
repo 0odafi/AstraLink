@@ -47,7 +47,7 @@ if (-not [string]::IsNullOrWhiteSpace(($localTag | Out-String))) {
 
 $remoteTag = git ls-remote --tags $Remote "refs/tags/$tagName"
 if (-not [string]::IsNullOrWhiteSpace(($remoteTag | Out-String))) {
-  throw "Tag already exists on $Remote: $tagName"
+  throw "Tag already exists on ${Remote}: $tagName"
 }
 
 Write-Host "Repository:" $gitTopLevel
