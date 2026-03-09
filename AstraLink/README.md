@@ -125,3 +125,14 @@ pytest -q
 - Manifest file: `releases/manifest.json`
 - Release endpoint reads it: `/api/releases/latest/{platform}`
 - Client checks updates from Settings tab.
+
+## Server Update Mode
+
+For Ubuntu deployment, the recommended mode is now git deploy:
+
+- first-time conversion from copied folder:
+  - `sudo bash /opt/astralink/deploy/ubuntu/enable_git_deploy.sh`
+- regular updates:
+  - `sudo bash /opt/astralink/deploy/ubuntu/update_git_deploy.sh`
+
+Details: `deploy/ubuntu/README.md`

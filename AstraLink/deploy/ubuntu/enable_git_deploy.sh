@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root: sudo bash deploy/ubuntu/enable_git_deploy.sh"
+  exit 1
+fi
+
+APP_DIR="${APP_DIR:-/opt/astralink}"
+APP_USER="${APP_USER:-astralink}"
+APP_GROUP="${APP_GROUP:-astralink}"
+BRANCH="${BRANCH:-master}"
+REPO_URL="${REPO_URL:-https://github.com/0odafi/AstraLink.git}"
+TIMESTAMP="$(date +%Y%m%d%H%M%S)"
+BACKUP_DIR="${APP_DIR}.backup-${TIMESTAMP}"
+TMP_DIR="${APP_DIR}.clone-${TIMESTAMP}"
+
+if [[ ! -d "${APP_DIR}" ]]; then
+  echo "Directory ${APP_DIR} does not exist."
+  exit 1
+fi
+
+if [[ -d "${APP_DIR}/.git" ]]; then
+  echo "${APP_DIR} is already a git repository."
+  exit 0
+fi
+
+echo "Converting ${APP_DIR} to git deploy checkout"
+echo "Repository: ${REPO_URL}"
+echo "Branch: ${BRANCH}"
+
+git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${TMP_DIR}"
+
+mv "${APP_DIR}" "${BACKUP_DIR}"
+mv "${TMP_DIR}" "${APP_DIR}"
+
+for dir_name in venv media releases; do
+  if [[ -d "${BACKUP_DIR}/${dir_name}" ]]; then
+    rm -rf "${APP_DIR:?}/${dir_name}"
+    mv "${BACKUP_DIR}/${dir_name}" "${APP_DIR}/${dir_name}"
+  fi
+done
+
+for file_name in astralink.db; do
+  if [[ -f "${BACKUP_DIR}/${file_name}" ]]; then
+    mv "${BACKUP_DIR}/${file_name}" "${APP_DIR}/${file_name}"
+  fi
+done
+
+chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
+
+if [[ -x "${APP_DIR}/venv/bin/pip" ]]; then
+  sudo -u "${APP_USER}" "${APP_DIR}/venv/bin/pip" install --upgrade pip
+  sudo -u "${APP_USER}" "${APP_DIR}/venv/bin/pip" install -e "${APP_DIR}"
+fi
+
+echo
+echo "Git deploy is enabled."
+echo "Backup of previous directory: ${BACKUP_DIR}"
+echo "Current checkout: ${APP_DIR}"
+echo
+echo "Next commands:"
+echo "  systemctl restart astralink-api"
+echo "  systemctl status astralink-api --no-pager -l"

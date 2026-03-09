@@ -16,6 +16,42 @@ Copy repository to server and run:
 sudo bash deploy/ubuntu/setup_server.sh
 ```
 
+## 2.1 Switch existing server to git deploy
+
+If `/opt/astralink` already exists and was uploaded by SFTP, convert it in place:
+
+```bash
+cd /opt/astralink
+sudo bash deploy/ubuntu/enable_git_deploy.sh
+```
+
+Default source repository:
+
+```text
+https://github.com/0odafi/AstraLink.git
+```
+
+Optional overrides:
+
+```bash
+sudo REPO_URL=https://github.com/0odafi/AstraLink.git BRANCH=master \
+  bash /opt/astralink/deploy/ubuntu/enable_git_deploy.sh
+```
+
+What the script does:
+
+- creates a fresh git clone
+- keeps runtime directories: `venv/`, `media/`, `releases/`
+- keeps local sqlite file `astralink.db` if it exists
+- creates a backup directory like `/opt/astralink.backup-20260309153000`
+- reinstalls backend dependencies into `/opt/astralink/venv`
+
+After that, regular updates become:
+
+```bash
+sudo bash /opt/astralink/deploy/ubuntu/update_git_deploy.sh
+```
+
 ## 3. Configure backend service
 
 ```bash
@@ -38,6 +74,12 @@ Install backend dependencies into server venv:
 sudo -u astralink /opt/astralink/venv/bin/pip install --upgrade pip
 sudo -u astralink /opt/astralink/venv/bin/pip install -e /opt/astralink
 sudo systemctl restart astralink-api
+```
+
+After git deploy is enabled, use this instead for updates:
+
+```bash
+sudo bash /opt/astralink/deploy/ubuntu/update_git_deploy.sh
 ```
 
 ## 4. Configure nginx
