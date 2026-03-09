@@ -5,17 +5,24 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'api.dart';
+import 'core/deep_links/deep_link_source.dart';
 import 'core/ui/adaptive_size.dart';
 import 'core/ui/app_theme.dart';
 import 'features/auth/presentation/auth_screen.dart';
 import 'features/home/presentation/home_shell.dart';
 import 'features/profile/presentation/profile_setup_screen.dart';
+import 'features/profile/presentation/public_profile_screen.dart';
 import 'features/settings/application/app_preferences.dart';
 import 'models.dart';
 import 'session.dart';
 
 class AstraMessengerApp extends StatefulWidget {
-  const AstraMessengerApp({super.key});
+  final DeepLinkSource deepLinkSource;
+
+  const AstraMessengerApp({
+    super.key,
+    this.deepLinkSource = const NoopDeepLinkSource(),
+  });
 
   @override
   State<AstraMessengerApp> createState() => _AstraMessengerAppState();
@@ -23,6 +30,7 @@ class AstraMessengerApp extends StatefulWidget {
 
 class _AstraMessengerAppState extends State<AstraMessengerApp> {
   final SessionStore _store = SessionStore();
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   bool _loading = true;
   String _baseUrl = normalizeBaseUrl(kDefaultApiBaseUrl);
   String _updateChannel = 'stable';
@@ -30,6 +38,9 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
   AuthTokens? _tokens;
   AppUser? _user;
   bool _needsProfileSetup = false;
+  String? _pendingPublicUsername;
+  String? _lastHandledDeepLink;
+  StreamSubscription<Uri>? _deepLinkSubscription;
 
   AstraApi get _api =>
       AstraApi(baseUrl: _baseUrl, onRefreshToken: _refreshFromApi);
@@ -37,7 +48,21 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
   @override
   void initState() {
     super.initState();
+    _bindDeepLinks();
     unawaited(_bootstrap());
+  }
+
+  @override
+  void dispose() {
+    _deepLinkSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _bindDeepLinks() {
+    _deepLinkSubscription = widget.deepLinkSource.uriStream.listen(
+      _handleDeepLinkUri,
+      onError: (_) {},
+    );
   }
 
   Future<void> _bootstrap() async {
@@ -56,10 +81,16 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
       await _loadCurrentUser();
     }
 
+    final initialUri = await widget.deepLinkSource.getInitialUri();
+    if (initialUri != null) {
+      _handleDeepLinkUri(initialUri);
+    }
+
     if (!mounted) return;
     setState(() {
       _loading = false;
     });
+    _flushPendingPublicProfile();
   }
 
   Future<AuthTokens?> _refreshFromApi(String refreshToken) async {
@@ -105,6 +136,7 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
     );
     if (!mounted) return;
     setState(() {});
+    _flushPendingPublicProfile();
   }
 
   Future<void> _onUserUpdated(AppUser next) async {
@@ -123,6 +155,7 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
     );
     if (!mounted) return;
     setState(() {});
+    _flushPendingPublicProfile();
   }
 
   Future<void> _performLogout() async {
@@ -132,6 +165,7 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
     await _store.saveSession(baseUrl: _baseUrl, tokens: null);
     if (!mounted) return;
     setState(() {});
+    _flushPendingPublicProfile();
   }
 
   Future<void> _changeUpdateChannel(String channel) async {
@@ -139,6 +173,51 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
     await _store.saveUpdateChannel(channel);
     if (!mounted) return;
     setState(() {});
+  }
+
+  void _handleDeepLinkUri(Uri uri) {
+    final serialized = uri.toString();
+    if (_lastHandledDeepLink == serialized) {
+      return;
+    }
+    _lastHandledDeepLink = serialized;
+
+    final username = publicProfileUsernameFromUri(uri);
+    if (username == null || username.isEmpty) {
+      return;
+    }
+
+    _pendingPublicUsername = username;
+    _flushPendingPublicProfile();
+  }
+
+  void _flushPendingPublicProfile() {
+    if (_loading || _pendingPublicUsername == null) {
+      return;
+    }
+    final navigator = _navigatorKey.currentState;
+    if (navigator == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _flushPendingPublicProfile();
+      });
+      return;
+    }
+
+    final username = _pendingPublicUsername!;
+    _pendingPublicUsername = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      navigator.push(
+        MaterialPageRoute(
+          builder: (_) => PublicProfileScreen(
+            api: _api,
+            getTokens: () => _tokens,
+            username: username,
+            viewer: _user,
+          ),
+        ),
+      );
+    });
   }
 
   @override
@@ -149,6 +228,7 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
         return MaterialApp(
           title: 'AstraLink',
           debugShowCheckedModeBanner: false,
+          navigatorKey: _navigatorKey,
           theme: buildAstraTheme(appearance),
           home: _loading
               ? const _SplashScreen()

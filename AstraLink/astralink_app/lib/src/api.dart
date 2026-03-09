@@ -42,6 +42,31 @@ String normalizePublicUsername(String value) {
   return value.trim().replaceFirst(RegExp(r'^@+'), '').toLowerCase();
 }
 
+String? publicProfileUsernameFromUri(Uri uri) {
+  final pathSegments = uri.pathSegments
+      .where((segment) => segment.isNotEmpty)
+      .toList();
+  if (uri.scheme == 'astralink') {
+    if (uri.host.toLowerCase() == 'u' && pathSegments.isNotEmpty) {
+      final username = normalizePublicUsername(pathSegments.first);
+      return username.isEmpty ? null : username;
+    }
+    if (pathSegments.length >= 2 && pathSegments.first.toLowerCase() == 'u') {
+      final username = normalizePublicUsername(pathSegments[1]);
+      return username.isEmpty ? null : username;
+    }
+    return null;
+  }
+
+  if ((uri.scheme == 'https' || uri.scheme == 'http') &&
+      pathSegments.length >= 2 &&
+      pathSegments.first.toLowerCase() == 'u') {
+    final username = normalizePublicUsername(pathSegments[1]);
+    return username.isEmpty ? null : username;
+  }
+  return null;
+}
+
 String runtimePlatformKey() {
   if (kIsWeb) return 'web';
   switch (defaultTargetPlatform) {

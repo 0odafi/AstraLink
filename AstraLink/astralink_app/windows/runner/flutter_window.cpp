@@ -4,8 +4,9 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
-FlutterWindow::FlutterWindow(const flutter::DartProject& project)
-    : project_(project) {}
+FlutterWindow::FlutterWindow(const flutter::DartProject& project,
+                             std::optional<std::string> initial_deep_link)
+    : project_(project), initial_deep_link_(std::move(initial_deep_link)) {}
 
 FlutterWindow::~FlutterWindow() {}
 
@@ -25,6 +26,38 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  deep_link_method_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          "astralink/deep_links",
+          &flutter::StandardMethodCodec::GetInstance());
+  deep_link_method_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        if (call.method_name() == "getInitialLink") {
+          if (initial_deep_link_.has_value()) {
+            result->Success(flutter::EncodableValue(*initial_deep_link_));
+          } else {
+            result->Success();
+          }
+          return;
+        }
+        result->NotImplemented();
+      });
+  deep_link_event_channel_ =
+      std::make_unique<flutter::EventChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          "astralink/deep_links/events",
+          &flutter::StandardMethodCodec::GetInstance());
+  auto stream_handler =
+      std::make_unique<flutter::StreamHandlerFunctions<flutter::EncodableValue>>(
+          [](const flutter::EncodableValue*,
+             std::unique_ptr<flutter::EventSink<flutter::EncodableValue>>&&) {
+            return nullptr;
+          },
+          [](const flutter::EncodableValue*) { return nullptr; });
+  deep_link_event_channel_->SetStreamHandler(std::move(stream_handler));
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -41,6 +74,8 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   if (flutter_controller_) {
+    deep_link_method_channel_.reset();
+    deep_link_event_channel_.reset();
     flutter_controller_ = nullptr;
   }
 

@@ -2,8 +2,22 @@
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
 
+#include <optional>
+
 #include "flutter_window.h"
 #include "utils.h"
+
+std::optional<std::string> ExtractInitialDeepLink(
+    const std::vector<std::string>& arguments) {
+  for (const auto& argument : arguments) {
+    if (argument.rfind("astralink://", 0) == 0 ||
+        argument.rfind("https://", 0) == 0 ||
+        argument.rfind("http://", 0) == 0) {
+      return argument;
+    }
+  }
+  return std::nullopt;
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
@@ -21,10 +35,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
+  std::optional<std::string> initial_deep_link =
+      ExtractInitialDeepLink(command_line_arguments);
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
-  FlutterWindow window(project);
+  FlutterWindow window(project, std::move(initial_deep_link));
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"astralink_app", origin, size)) {
