@@ -40,6 +40,21 @@ class _ProfileTabState extends State<ProfileTab> {
   }
 
   @override
+  void didUpdateWidget(covariant ProfileTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.me.id != widget.me.id ||
+        oldWidget.me.username != widget.me.username ||
+        oldWidget.me.firstName != widget.me.firstName ||
+        oldWidget.me.lastName != widget.me.lastName ||
+        oldWidget.me.bio != widget.me.bio) {
+      _usernameController.text = widget.me.username;
+      _firstNameController.text = widget.me.firstName;
+      _lastNameController.text = widget.me.lastName;
+      _bioController.text = widget.me.bio;
+    }
+  }
+
+  @override
   void dispose() {
     _usernameController.dispose();
     _firstNameController.dispose();

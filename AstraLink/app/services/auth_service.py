@@ -131,7 +131,7 @@ def request_phone_login_code(db: Session, phone: str) -> PhoneCodeResponse:
     )
 
 
-def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> User:
+def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> tuple[User, bool]:
     normalized_phone = normalize_phone(payload.phone)
     token_hash = hash_refresh_token(payload.code_token)
     now = _now_like()
@@ -169,6 +169,7 @@ def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> Use
     db.add(code_session)
 
     user = db.scalar(select(User).where(User.phone == normalized_phone))
+    created = False
     if user is None:
         first_name = (payload.first_name or "").strip()
         last_name = (payload.last_name or "").strip()
@@ -183,6 +184,7 @@ def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> Use
             password_hash=hash_password(generate_refresh_token()),
         )
         db.add(user)
+        created = True
     else:
         # Fill profile defaults for legacy users if missing.
         if not user.first_name and payload.first_name:
@@ -195,7 +197,7 @@ def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> Use
 
     db.commit()
     db.refresh(user)
-    return user
+    return user, created
 
 
 def register_user(db: Session, payload: RegisterRequest) -> User:
@@ -251,13 +253,19 @@ def _issue_refresh_token(db: Session, user_id: int) -> str:
     return raw_token
 
 
-def build_token_response(db: Session, user: User) -> TokenResponse:
+def build_token_response(
+    db: Session,
+    user: User,
+    *,
+    needs_profile_setup: bool = False,
+) -> TokenResponse:
     access_token = create_access_token(str(user.id))
     refresh_token = _issue_refresh_token(db, user_id=user.id)
     db.commit()
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
+        needs_profile_setup=needs_profile_setup,
         user=UserPublic.model_validate(user),
     )
 

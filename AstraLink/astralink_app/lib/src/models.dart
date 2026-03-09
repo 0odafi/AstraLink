@@ -26,6 +26,16 @@ class AppUser {
     return username;
   }
 
+  bool get hasProfileName => firstName.trim().isNotEmpty;
+
+  bool get usernameLooksGenerated {
+    final normalized = username.trim().toLowerCase();
+    final digitsOnlyTail = normalized.replaceFirst(RegExp(r'^user'), '');
+    return normalized.startsWith('user') &&
+        digitsOnlyTail.isNotEmpty &&
+        RegExp(r'^[0-9]+$').hasMatch(digitsOnlyTail);
+  }
+
   factory AppUser.fromJson(Map<String, dynamic> json) {
     return AppUser(
       id: json['id'] as int,
@@ -49,8 +59,13 @@ class AuthTokens {
 class AuthResult {
   final AuthTokens tokens;
   final AppUser user;
+  final bool needsProfileSetup;
 
-  const AuthResult({required this.tokens, required this.user});
+  const AuthResult({
+    required this.tokens,
+    required this.user,
+    required this.needsProfileSetup,
+  });
 }
 
 class PhoneCodeSession {

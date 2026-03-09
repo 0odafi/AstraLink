@@ -389,6 +389,7 @@ class AstraApi {
         accessToken: (json['access_token'] ?? '').toString(),
         refreshToken: (json['refresh_token'] ?? '').toString(),
       ),
+      needsProfileSetup: (json['needs_profile_setup'] ?? false) == true,
       user: AppUser.fromJson((json['user'] as Map).cast<String, dynamic>()),
     );
   }

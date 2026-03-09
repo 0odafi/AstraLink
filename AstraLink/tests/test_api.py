@@ -42,7 +42,31 @@ def _auth_by_phone(client, phone: str, first_name: str, last_name: str):
     assert payload["access_token"]
     assert payload["refresh_token"]
     assert payload["user"]["phone"] == request_payload["phone"]
+    assert payload["needs_profile_setup"] is True
     return payload
+
+
+def test_phone_auth_follow_up_login_does_not_require_profile_setup(client):
+    phone = "+7 900 100 10 10"
+    first = _auth_by_phone(client, phone, "Setup", "Needed")
+
+    request_code = client.post("/api/auth/request-code", json={"phone": phone})
+    assert request_code.status_code == 200, request_code.text
+    request_payload = request_code.json()
+    assert request_payload["is_registered"] is True
+
+    verify_code = client.post(
+        "/api/auth/verify-code",
+        json={
+            "phone": request_payload["phone"],
+            "code_token": request_payload["code_token"],
+            "code": TEST_AUTH_CODE,
+        },
+    )
+    assert verify_code.status_code == 200, verify_code.text
+    payload = verify_code.json()
+    assert payload["user"]["id"] == first["user"]["id"]
+    assert payload["needs_profile_setup"] is False
 
 
 def test_phone_auth_profile_and_lookup_flow(client):

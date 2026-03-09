@@ -9,6 +9,7 @@ import 'core/ui/adaptive_size.dart';
 import 'core/ui/app_theme.dart';
 import 'features/auth/presentation/auth_screen.dart';
 import 'features/home/presentation/home_shell.dart';
+import 'features/profile/presentation/profile_setup_screen.dart';
 import 'features/settings/application/app_preferences.dart';
 import 'models.dart';
 import 'session.dart';
@@ -28,6 +29,7 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
   String _appVersion = '0.0.0+0';
   AuthTokens? _tokens;
   AppUser? _user;
+  bool _needsProfileSetup = false;
 
   AstraApi get _api =>
       AstraApi(baseUrl: _baseUrl, onRefreshToken: _refreshFromApi);
@@ -44,6 +46,7 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
     _baseUrl = session.baseUrl;
     _updateChannel = session.updateChannel;
     _appVersion = '${info.version}+${info.buildNumber}';
+    _needsProfileSetup = session.needsProfileSetup;
 
     if (session.isAuthenticated) {
       _tokens = AuthTokens(
@@ -64,7 +67,12 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
       final refreshed = await _api.refreshSession(refreshToken);
       _tokens = refreshed.tokens;
       _user = refreshed.user;
-      await _store.saveSession(baseUrl: _baseUrl, tokens: _tokens);
+      _needsProfileSetup = _needsProfileSetup || refreshed.needsProfileSetup;
+      await _store.saveSession(
+        baseUrl: _baseUrl,
+        tokens: _tokens,
+        needsProfileSetup: _needsProfileSetup,
+      );
       if (mounted) setState(() {});
       return _tokens;
     } catch (_) {
@@ -89,7 +97,12 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
   Future<void> _onAuthorized(AuthResult result) async {
     _tokens = result.tokens;
     _user = result.user;
-    await _store.saveSession(baseUrl: _baseUrl, tokens: _tokens);
+    _needsProfileSetup = result.needsProfileSetup;
+    await _store.saveSession(
+      baseUrl: _baseUrl,
+      tokens: _tokens,
+      needsProfileSetup: _needsProfileSetup,
+    );
     if (!mounted) return;
     setState(() {});
   }
@@ -100,9 +113,22 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
     setState(() {});
   }
 
+  Future<void> _completeProfileSetup(AppUser next) async {
+    _user = next;
+    _needsProfileSetup = false;
+    await _store.saveSession(
+      baseUrl: _baseUrl,
+      tokens: _tokens,
+      needsProfileSetup: false,
+    );
+    if (!mounted) return;
+    setState(() {});
+  }
+
   Future<void> _performLogout() async {
     _tokens = null;
     _user = null;
+    _needsProfileSetup = false;
     await _store.saveSession(baseUrl: _baseUrl, tokens: null);
     if (!mounted) return;
     setState(() {});
@@ -128,6 +154,14 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
               ? const _SplashScreen()
               : (_tokens == null || _user == null)
               ? AuthScreen(api: _api, onAuthorized: _onAuthorized)
+              : _needsProfileSetup
+              ? ProfileSetupScreen(
+                  api: _api,
+                  getTokens: () => _tokens,
+                  user: _user!,
+                  onCompleted: _completeProfileSetup,
+                  onLogout: _performLogout,
+                )
               : HomeShell(
                   api: _api,
                   getTokens: () => _tokens,
