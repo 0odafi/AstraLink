@@ -1,18 +1,22 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:open_file/open_file.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../api.dart';
+import '../../../core/cache/attachment_cache.dart';
 import '../../../core/realtime/realtime_cursor_store.dart';
 import '../../../core/ui/adaptive_size.dart';
 import '../../../core/ui/app_appearance.dart';
@@ -787,6 +791,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _voiceRecording = false;
   bool _voiceUploading = false;
   final Set<int> _typingUserIds = <int>{};
+  final Map<int, double?> _attachmentDownloads = <int, double?>{};
   int _realtimeCursor = 0;
   int? _replyToMessageId;
   int? _editingMessageId;
@@ -1702,13 +1707,74 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _openAttachment(MessageAttachmentItem attachment) async {
-    final uri = Uri.tryParse(widget.api.resolveUrl(attachment.url));
+    final resolvedUrl = widget.api.resolveUrl(attachment.url);
+    final uri = Uri.tryParse(resolvedUrl);
     if (uri == null) {
       _showSnack('Attachment URL is invalid');
       return;
     }
-    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!opened) {
+
+    if (_attachmentDownloads.containsKey(attachment.id)) {
+      return;
+    }
+
+    try {
+      final cachedFile = await AstraAttachmentCache.instance.getCachedFile(
+        resolvedUrl,
+      );
+      if (cachedFile != null) {
+        await _openLocalAttachment(cachedFile);
+        return;
+      }
+
+      if (mounted) {
+        setState(() => _attachmentDownloads[attachment.id] = 0);
+      }
+
+      File? downloadedFile;
+      await for (final event in AstraAttachmentCache.instance.download(
+        resolvedUrl,
+      )) {
+        if (!mounted) break;
+        if (event.file != null) {
+          downloadedFile = event.file;
+          setState(() => _attachmentDownloads.remove(attachment.id));
+          break;
+        }
+        setState(() {
+          _attachmentDownloads[attachment.id] = event.progress?.clamp(0, 1);
+        });
+      }
+
+      if (downloadedFile != null) {
+        await _openLocalAttachment(downloadedFile);
+        return;
+      }
+
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!opened) {
+        _showSnack('Could not open attachment');
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _attachmentDownloads.remove(attachment.id));
+      }
+      _showSnack('Could not download attachment');
+    }
+  }
+
+  Future<void> _openLocalAttachment(File file) async {
+    if (kIsWeb) {
+      final uri = Uri.file(file.path);
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!opened) {
+        _showSnack('Could not open attachment');
+      }
+      return;
+    }
+
+    final result = await OpenFile.open(file.path);
+    if (result.type != ResultType.done) {
       _showSnack('Could not open attachment');
     }
   }
@@ -1944,6 +2010,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           onLongPress: () => _showMessageActions(message),
                           attachmentUrlBuilder: widget.api.resolveUrl,
                           onAttachmentTap: _openAttachment,
+                          attachmentDownloadProgressLookup: (attachmentId) =>
+                              _attachmentDownloads[attachmentId],
                           onReactionTap: (emoji, reactedByMe) =>
                               _toggleReaction(
                                 message: message,
@@ -2422,6 +2490,7 @@ class _MessageBubble extends StatelessWidget {
   final String Function(String pathOrUrl) attachmentUrlBuilder;
   final Future<void> Function(MessageAttachmentItem attachment)?
   onAttachmentTap;
+  final double? Function(int attachmentId)? attachmentDownloadProgressLookup;
   final Future<void> Function(String emoji, bool reactedByMe)? onReactionTap;
 
   const _MessageBubble({
@@ -2432,6 +2501,7 @@ class _MessageBubble extends StatelessWidget {
     this.onLongPress,
     required this.attachmentUrlBuilder,
     this.onAttachmentTap,
+    this.attachmentDownloadProgressLookup,
     this.onReactionTap,
   });
 
@@ -2526,18 +2596,104 @@ class _MessageBubble extends StatelessWidget {
                       top: message.content.trim().isEmpty ? 0 : context.sp(8),
                     ),
                     child: Column(
-                      children: message.attachments
-                          .map(
-                            (attachment) => Padding(
-                              padding: EdgeInsets.only(bottom: context.sp(6)),
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(
-                                  context.sp(12),
-                                ),
-                                onTap: onAttachmentTap == null
-                                    ? null
-                                    : () => onAttachmentTap!(attachment),
-                                child: Container(
+                      children: message.attachments.map((attachment) {
+                        final downloadProgress =
+                            attachmentDownloadProgressLookup?.call(
+                              attachment.id,
+                            );
+                        final child = attachment.isImage
+                            ? Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(
+                                      context.sp(10),
+                                    ),
+                                    child: CachedNetworkImage(
+                                      imageUrl: attachmentUrlBuilder(
+                                        attachment.url,
+                                      ),
+                                      height: context.sp(140),
+                                      width: double.infinity,
+                                      fit: BoxFit.cover,
+                                      progressIndicatorBuilder:
+                                          (context, url, progress) => Container(
+                                            height: context.sp(140),
+                                            color: Colors.black.withValues(
+                                              alpha: 0.08,
+                                            ),
+                                            alignment: Alignment.center,
+                                            child: CircularProgressIndicator(
+                                              value: progress.progress,
+                                            ),
+                                          ),
+                                      errorWidget: (context, url, error) =>
+                                          Container(
+                                            height: context.sp(140),
+                                            color: Colors.black.withValues(
+                                              alpha: 0.08,
+                                            ),
+                                            alignment: Alignment.center,
+                                            child: Icon(
+                                              Icons.broken_image_outlined,
+                                              size: context.sp(28),
+                                              color: attachmentColor,
+                                            ),
+                                          ),
+                                    ),
+                                  ),
+                                  SizedBox(height: context.sp(8)),
+                                  Text(
+                                    attachment.fileName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize:
+                                          context.sp(13) *
+                                          appearance.messageTextScale,
+                                    ),
+                                  ),
+                                ],
+                              )
+                            : attachment.isAudio
+                            ? _AudioAttachmentTile(
+                                attachment: attachment,
+                                url: attachmentUrlBuilder(attachment.url),
+                                appearance: appearance,
+                              )
+                            : Row(
+                                children: [
+                                  Icon(
+                                    Icons.attach_file_rounded,
+                                    size: context.sp(18),
+                                    color: attachmentColor,
+                                  ),
+                                  SizedBox(width: context.sp(8)),
+                                  Expanded(
+                                    child: Text(
+                                      attachment.fileName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize:
+                                            context.sp(13) *
+                                            appearance.messageTextScale,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              );
+
+                        return Padding(
+                          padding: EdgeInsets.only(bottom: context.sp(6)),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(context.sp(12)),
+                            onTap: onAttachmentTap == null
+                                ? null
+                                : () => onAttachmentTap!(attachment),
+                            child: Stack(
+                              children: [
+                                Container(
                                   width: double.infinity,
                                   padding: EdgeInsets.symmetric(
                                     horizontal: context.sp(10),
@@ -2549,94 +2705,49 @@ class _MessageBubble extends StatelessWidget {
                                       context.sp(12),
                                     ),
                                   ),
-                                  child: attachment.isImage
-                                      ? Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            ClipRRect(
-                                              borderRadius:
-                                                  BorderRadius.circular(
-                                                    context.sp(10),
-                                                  ),
-                                              child: Image.network(
-                                                attachmentUrlBuilder(
-                                                  attachment.url,
-                                                ),
-                                                height: context.sp(140),
-                                                width: double.infinity,
-                                                fit: BoxFit.cover,
-                                                errorBuilder:
-                                                    (
-                                                      context,
-                                                      error,
-                                                      stackTrace,
-                                                    ) => Container(
-                                                      height: context.sp(140),
-                                                      color: Colors.black
-                                                          .withValues(
-                                                            alpha: 0.08,
-                                                          ),
-                                                      alignment:
-                                                          Alignment.center,
-                                                      child: Icon(
-                                                        Icons
-                                                            .broken_image_outlined,
-                                                        size: context.sp(28),
-                                                        color: attachmentColor,
-                                                      ),
-                                                    ),
-                                              ),
-                                            ),
-                                            SizedBox(height: context.sp(8)),
-                                            Text(
-                                              attachment.fileName,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                fontSize:
-                                                    context.sp(13) *
-                                                    appearance.messageTextScale,
-                                              ),
-                                            ),
-                                          ],
-                                        )
-                                      : attachment.isAudio
-                                      ? _AudioAttachmentTile(
-                                          attachment: attachment,
-                                          url: attachmentUrlBuilder(
-                                            attachment.url,
-                                          ),
-                                          appearance: appearance,
-                                        )
-                                      : Row(
-                                          children: [
-                                            Icon(
-                                              Icons.attach_file_rounded,
-                                              size: context.sp(18),
-                                              color: attachmentColor,
-                                            ),
-                                            SizedBox(width: context.sp(8)),
-                                            Expanded(
-                                              child: Text(
-                                                attachment.fileName,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: TextStyle(
-                                                  fontSize:
-                                                      context.sp(13) *
-                                                      appearance
-                                                          .messageTextScale,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
+                                  child: child,
                                 ),
-                              ),
+                                if (downloadProgress != null)
+                                  Positioned.fill(
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withValues(
+                                          alpha: 0.45,
+                                        ),
+                                        borderRadius: BorderRadius.circular(
+                                          context.sp(12),
+                                        ),
+                                      ),
+                                      child: Center(
+                                        child: SizedBox(
+                                          width: context.sp(132),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const CircularProgressIndicator(),
+                                              SizedBox(height: context.sp(10)),
+                                              Text(
+                                                downloadProgress <= 0
+                                                    ? 'Downloading...'
+                                                    : 'Downloading ${(downloadProgress * 100).round()}%',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: context.sp(12),
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                textAlign: TextAlign.center,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
-                          )
-                          .toList(),
+                          ),
+                        );
+                      }).toList(),
                     ),
                   ),
                 if (message.reactions.isNotEmpty)
