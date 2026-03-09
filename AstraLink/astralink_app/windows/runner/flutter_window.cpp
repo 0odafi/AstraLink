@@ -4,6 +4,38 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+class FlutterWindow::DeepLinkStreamHandler
+    : public flutter::StreamHandler<flutter::EncodableValue> {
+ public:
+  DeepLinkStreamHandler() = default;
+  ~DeepLinkStreamHandler() override = default;
+
+  void Emit(const std::string& deep_link) {
+    if (events_) {
+      events_->Success(flutter::EncodableValue(deep_link));
+    }
+  }
+
+ protected:
+  std::unique_ptr<flutter::StreamHandlerError<flutter::EncodableValue>>
+  OnListenInternal(
+      const flutter::EncodableValue* arguments,
+      std::unique_ptr<flutter::EventSink<flutter::EncodableValue>>&& events)
+      override {
+    events_ = std::move(events);
+    return nullptr;
+  }
+
+  std::unique_ptr<flutter::StreamHandlerError<flutter::EncodableValue>>
+  OnCancelInternal(const flutter::EncodableValue* arguments) override {
+    events_.reset();
+    return nullptr;
+  }
+
+ private:
+  std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> events_;
+};
+
 FlutterWindow::FlutterWindow(const flutter::DartProject& project,
                              std::optional<std::string> initial_deep_link)
     : project_(project), initial_deep_link_(std::move(initial_deep_link)) {}
@@ -50,13 +82,8 @@ bool FlutterWindow::OnCreate() {
           flutter_controller_->engine()->messenger(),
           "astralink/deep_links/events",
           &flutter::StandardMethodCodec::GetInstance());
-  auto stream_handler =
-      std::make_unique<flutter::StreamHandlerFunctions<flutter::EncodableValue>>(
-          [](const flutter::EncodableValue*,
-             std::unique_ptr<flutter::EventSink<flutter::EncodableValue>>&&) {
-            return nullptr;
-          },
-          [](const flutter::EncodableValue*) { return nullptr; });
+  auto stream_handler = std::make_unique<DeepLinkStreamHandler>();
+  deep_link_stream_handler_ = stream_handler.get();
   deep_link_event_channel_->SetStreamHandler(std::move(stream_handler));
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -74,6 +101,10 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   if (flutter_controller_) {
+    if (deep_link_event_channel_) {
+      deep_link_event_channel_->SetStreamHandler(nullptr);
+    }
+    deep_link_stream_handler_ = nullptr;
     deep_link_method_channel_.reset();
     deep_link_event_channel_.reset();
     flutter_controller_ = nullptr;
