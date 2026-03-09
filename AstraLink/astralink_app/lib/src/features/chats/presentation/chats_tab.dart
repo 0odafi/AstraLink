@@ -264,8 +264,8 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
             controller: controller,
             autofocus: true,
             decoration: const InputDecoration(
-              labelText: 'Phone or @username',
-              hintText: '+7900... or @username',
+              labelText: 'Phone, @username or link',
+              hintText: '+7900..., @username or https://.../u/name',
             ),
           ),
           actions: [

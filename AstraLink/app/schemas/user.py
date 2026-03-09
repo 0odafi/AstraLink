@@ -16,6 +16,18 @@ class UserPublic(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PublicUserProfile(BaseModel):
+    id: int
+    username: str
+    first_name: str
+    last_name: str
+    bio: str
+    avatar_url: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ProfileUpdate(BaseModel):
     bio: str | None = Field(default=None, max_length=1000)
     avatar_url: str | None = Field(default=None, max_length=500)

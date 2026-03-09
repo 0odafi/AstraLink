@@ -1,4 +1,5 @@
 import re
+from urllib.parse import urlparse
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -44,8 +45,28 @@ def _phone_search_pattern(query: str) -> str | None:
         return None
 
 
+def extract_lookup_query(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+
+    if "://" not in cleaned:
+        return cleaned
+
+    parsed = urlparse(cleaned)
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    if parsed.netloc.lower() == "u" and path_parts:
+        return path_parts[0]
+    if len(path_parts) >= 2 and path_parts[0].lower() == "u":
+        return path_parts[1]
+    if path_parts:
+        return path_parts[-1]
+    return cleaned
+
+
 def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
-    cleaned_query = query.strip()
+    cleaned_query = extract_lookup_query(query)
     if not cleaned_query:
         return []
 
@@ -77,7 +98,7 @@ def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
 
 
 def find_user_by_phone_or_username(db: Session, query: str) -> User | None:
-    cleaned_query = query.strip()
+    cleaned_query = extract_lookup_query(query)
     if not cleaned_query:
         return None
 
@@ -92,6 +113,13 @@ def find_user_by_phone_or_username(db: Session, query: str) -> User | None:
 
     normalized_username = normalize_username(cleaned_query)
     if not normalized_username:
+        return None
+    return db.scalar(select(User).where(User.username == normalized_username))
+
+
+def find_user_by_username(db: Session, username: str) -> User | None:
+    normalized_username = normalize_username(extract_lookup_query(username))
+    if not normalized_username or not validate_username(normalized_username):
         return None
     return db.scalar(select(User).where(User.username == normalized_username))
 

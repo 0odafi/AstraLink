@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
 import '../../../models.dart';
+import 'public_profile_screen.dart';
 
 class ProfileTab extends StatefulWidget {
   final AstraApi api;
@@ -273,6 +274,37 @@ class _ProfileTabState extends State<ProfileTab> {
     }
   }
 
+  Future<void> _copyPublicLink() async {
+    final handle = widget.me.username;
+    if (handle == null || handle.trim().isEmpty) {
+      _showSnack('Set a public username first');
+      return;
+    }
+    await Clipboard.setData(
+      ClipboardData(text: widget.api.publicProfileUrl(handle)),
+    );
+    if (!mounted) return;
+    _showSnack('Profile link copied');
+  }
+
+  Future<void> _previewPublicProfile() async {
+    final handle = widget.me.username;
+    if (handle == null || handle.trim().isEmpty) {
+      _showSnack('Set a public username first');
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PublicProfileScreen(
+          api: widget.api,
+          getTokens: widget.getTokens,
+          username: handle,
+          viewer: widget.me,
+        ),
+      ),
+    );
+  }
+
   void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -329,6 +361,28 @@ class _ProfileTabState extends State<ProfileTab> {
                         ),
                       ),
                     ),
+                  if (widget.me.publicHandle != null) ...[
+                    SizedBox(height: context.sp(14)),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _copyPublicLink,
+                            icon: const Icon(Icons.link_rounded),
+                            label: const Text('Copy link'),
+                          ),
+                        ),
+                        SizedBox(width: context.sp(10)),
+                        Expanded(
+                          child: FilledButton.tonalIcon(
+                            onPressed: _previewPublicProfile,
+                            icon: const Icon(Icons.public_rounded),
+                            label: const Text('Preview'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),

@@ -38,6 +38,10 @@ String webSocketBase(String baseUrl) {
   return 'wss://$baseUrl';
 }
 
+String normalizePublicUsername(String value) {
+  return value.trim().replaceFirst(RegExp(r'^@+'), '').toLowerCase();
+}
+
 String runtimePlatformKey() {
   if (kIsWeb) return 'web';
   switch (defaultTargetPlatform) {
@@ -57,6 +61,14 @@ class AstraApi {
   final RefreshTokenHandler? onRefreshToken;
 
   const AstraApi({required this.baseUrl, this.onRefreshToken});
+
+  String publicProfileUrl(String username) {
+    final normalized = normalizePublicUsername(username);
+    final uri = Uri.parse(baseUrl);
+    return uri
+        .replace(path: '/u/$normalized', queryParameters: null, fragment: null)
+        .toString();
+  }
 
   Future<PhoneCodeSession> requestPhoneCode(String phone) async {
     final response = await _request(
@@ -278,6 +290,14 @@ class AstraApi {
       '/api/users/lookup?q=${Uri.encodeQueryComponent(query)}',
       accessToken: accessToken,
       refreshToken: refreshToken,
+    );
+    return AppUser.fromJson(_jsonMap(response));
+  }
+
+  Future<AppUser> publicProfile(String username) async {
+    final response = await _request(
+      'GET',
+      '/api/public/users/${Uri.encodeComponent(normalizePublicUsername(username))}',
     );
     return AppUser.fromJson(_jsonMap(response));
   }

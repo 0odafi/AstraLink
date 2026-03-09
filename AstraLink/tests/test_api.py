@@ -185,6 +185,14 @@ def test_search_users_by_phone_and_username(client):
     search_username_with_at = client.get("/api/users/search", headers=bob_headers, params={"q": "@alice"})
     assert search_username_with_at.status_code == 200, search_username_with_at.text
 
+    search_username_with_link = client.get(
+        "/api/users/search",
+        headers=bob_headers,
+        params={"q": "https://volds.ru/u/alice_search"},
+    )
+    assert search_username_with_link.status_code == 200, search_username_with_link.text
+    assert any(user["username"] == "alice_search" for user in search_username_with_link.json())
+
     search_phone = client.get("/api/users/search", headers=bob_headers, params={"q": "9003332233"})
     assert search_phone.status_code == 200, search_phone.text
     assert any(user["phone"] == "+79003332233" for user in search_phone.json())
@@ -223,6 +231,38 @@ def test_username_check_and_clear_flow(client):
     )
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["username"] is None
+
+
+def test_public_profile_endpoint_and_link_lookup(client):
+    owner = _auth_by_phone(client, "+7 900 351 22 33", "Public", "User")
+    viewer = _auth_by_phone(client, "+7 900 351 22 44", "Viewer", "User")
+
+    owner_headers = _auth_headers(owner["access_token"])
+    viewer_headers = _auth_headers(viewer["access_token"])
+
+    updated = client.patch(
+        "/api/users/me",
+        headers=owner_headers,
+        json={"first_name": "Public", "last_name": "User", "username": "public_user", "bio": "Visible bio"},
+    )
+    assert updated.status_code == 200, updated.text
+
+    public_profile = client.get("/api/public/users/public_user")
+    assert public_profile.status_code == 200, public_profile.text
+    payload = public_profile.json()
+    assert payload["username"] == "public_user"
+    assert payload["bio"] == "Visible bio"
+    assert "phone" not in payload
+
+    public_page = client.get("/u/public_user")
+    assert public_page.status_code == 200, public_page.text
+    assert "@public_user" in public_page.text
+
+    open_by_link = client.post(
+        "/api/chats/private?query=https%3A%2F%2Fvolds.ru%2Fu%2Fpublic_user",
+        headers=viewer_headers,
+    )
+    assert open_by_link.status_code == 200, open_by_link.text
 
 
 def test_realtime_message_status_flow(client):

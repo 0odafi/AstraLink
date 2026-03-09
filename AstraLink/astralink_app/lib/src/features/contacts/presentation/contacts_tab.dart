@@ -82,7 +82,9 @@ class _ContactsTabState extends State<ContactsTab> {
           content: TextField(
             controller: queryController,
             autofocus: true,
-            decoration: const InputDecoration(hintText: 'Phone or @username'),
+            decoration: const InputDecoration(
+              hintText: 'Phone, @username or profile link',
+            ),
           ),
           actions: [
             TextButton(
@@ -182,7 +184,7 @@ class _ContactsTabState extends State<ContactsTab> {
               controller: _searchController,
               decoration: const InputDecoration(
                 prefixIcon: Icon(Icons.search_rounded),
-                hintText: 'Search by phone, @username or name',
+                hintText: 'Search by phone, @username, link or name',
               ),
               onSubmitted: (_) => _search(),
               onChanged: (_) => setState(() {}),
