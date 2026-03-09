@@ -126,6 +126,32 @@ pytest -q
 - Release endpoint reads it: `/api/releases/latest/{platform}`
 - Client checks updates from Settings tab.
 
+Recommended release flow on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\odafi\Desktop\AstraLink\scripts\create_release_tag.ps1 -Version 0.0.2+2
+```
+
+What it does:
+
+- validates version format
+- creates annotated git tag `v0.0.2+2`
+- pushes the tag to `origin`
+- GitHub Actions starts release build/publish automatically
+
+Dry run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\odafi\Desktop\AstraLink\scripts\create_release_tag.ps1 -Version 0.0.2+2 -DryRun
+```
+
+Local manual builds also accept explicit version now:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\odafi\Desktop\AstraLink\scripts\build_windows.ps1 -Version 0.0.2+2
+powershell -ExecutionPolicy Bypass -File C:\Users\odafi\Desktop\AstraLink\scripts\build_android.ps1 -Version 0.0.2+2 -BuildAab
+```
+
 ## Server Update Mode
 
 For Ubuntu deployment, the recommended mode is now git deploy:

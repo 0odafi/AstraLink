@@ -1,13 +1,46 @@
 param(
   [string]$ProjectDir = "C:\Users\odafi\Desktop\AstraLink\astralink_app",
-  [string]$Version = "1.0.0+1"
+  [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
 
+function Resolve-AppVersion {
+  param(
+    [string]$ProjectDir,
+    [string]$RequestedVersion
+  )
+
+  $resolved = $RequestedVersion.Trim()
+  if ([string]::IsNullOrWhiteSpace($resolved)) {
+    $pubspecPath = Join-Path $ProjectDir "pubspec.yaml"
+    if (-not (Test-Path $pubspecPath)) {
+      throw "pubspec.yaml not found: $pubspecPath"
+    }
+    $versionLine = Select-String -Path $pubspecPath -Pattern '^version:\s*(.+)\s*$' | Select-Object -First 1
+    if (-not $versionLine) {
+      throw "version: line not found in $pubspecPath"
+    }
+    $resolved = $versionLine.Matches[0].Groups[1].Value.Trim()
+  }
+
+  if ($resolved.StartsWith("v")) {
+    $resolved = $resolved.Substring(1)
+  }
+  if ($resolved -notmatch '^\d+\.\d+\.\d+\+\d+$') {
+    throw "Invalid version format: $resolved. Expected x.y.z+build"
+  }
+  return $resolved
+}
+
+$Version = Resolve-AppVersion -ProjectDir $ProjectDir -RequestedVersion $Version
+$buildParts = $Version.Split("+", 2)
+$buildName = $buildParts[0]
+$buildNumber = $buildParts[1]
+
 Set-Location $ProjectDir
 flutter pub get
-flutter build windows --release
+flutter build windows --release --build-name=$buildName --build-number=$buildNumber
 
 $root = Split-Path $ProjectDir -Parent
 $target = Join-Path $root "dist\windows\$Version"
