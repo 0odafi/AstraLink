@@ -38,6 +38,11 @@ sudo REPO_URL=https://github.com/0odafi/AstraLink.git BRANCH=master \
   bash /opt/astralink/deploy/ubuntu/enable_git_deploy.sh
 ```
 
+If the git repository contains the project inside a nested folder such as
+`/opt/astralink/AstraLink`, the script detects it automatically and creates
+compatibility symlinks (`app`, `deploy`, `alembic`, `web`) in `/opt/astralink`.
+That keeps old service paths working.
+
 What the script does:
 
 - creates a fresh git clone
@@ -50,6 +55,16 @@ After that, regular updates become:
 
 ```bash
 sudo bash /opt/astralink/deploy/ubuntu/update_git_deploy.sh
+```
+
+If the very first conversion stopped after cloning but before `pip install`,
+recover with:
+
+```bash
+cd /opt/astralink
+git pull --ff-only origin master
+chmod +x AstraLink/deploy/ubuntu/update_git_deploy.sh
+sudo APP_DIR=/opt/astralink bash /opt/astralink/AstraLink/deploy/ubuntu/update_git_deploy.sh
 ```
 
 ## 3. Configure backend service

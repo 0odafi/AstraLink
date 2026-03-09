@@ -15,6 +15,35 @@ TIMESTAMP="$(date +%Y%m%d%H%M%S)"
 BACKUP_DIR="${APP_DIR}.backup-${TIMESTAMP}"
 TMP_DIR="${APP_DIR}.clone-${TIMESTAMP}"
 
+detect_source_dir() {
+  if [[ -f "${APP_DIR}/pyproject.toml" ]]; then
+    printf '%s\n' "${APP_DIR}"
+    return 0
+  fi
+
+  if [[ -f "${APP_DIR}/AstraLink/pyproject.toml" ]]; then
+    printf '%s\n' "${APP_DIR}/AstraLink"
+    return 0
+  fi
+
+  echo "Unable to locate pyproject.toml inside ${APP_DIR}" >&2
+  return 1
+}
+
+ensure_compat_links() {
+  local source_dir="$1"
+  if [[ "${source_dir}" == "${APP_DIR}" ]]; then
+    return 0
+  fi
+
+  local source_name
+  source_name="$(basename "${source_dir}")"
+  local link_name
+  for link_name in app alembic deploy web pyproject.toml alembic.ini README.md; do
+    ln -sfn "${source_name}/${link_name}" "${APP_DIR}/${link_name}"
+  done
+}
+
 if [[ ! -d "${APP_DIR}" ]]; then
   echo "Directory ${APP_DIR} does not exist."
   exit 1
@@ -47,17 +76,21 @@ for file_name in astralink.db; do
   fi
 done
 
+SOURCE_DIR="$(detect_source_dir)"
+ensure_compat_links "${SOURCE_DIR}"
+
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
 if [[ -x "${APP_DIR}/venv/bin/pip" ]]; then
   sudo -u "${APP_USER}" "${APP_DIR}/venv/bin/pip" install --upgrade pip
-  sudo -u "${APP_USER}" "${APP_DIR}/venv/bin/pip" install -e "${APP_DIR}"
+  sudo -u "${APP_USER}" "${APP_DIR}/venv/bin/pip" install -e "${SOURCE_DIR}"
 fi
 
 echo
 echo "Git deploy is enabled."
 echo "Backup of previous directory: ${BACKUP_DIR}"
 echo "Current checkout: ${APP_DIR}"
+echo "Python project root: ${SOURCE_DIR}"
 echo
 echo "Next commands:"
 echo "  systemctl restart astralink-api"
