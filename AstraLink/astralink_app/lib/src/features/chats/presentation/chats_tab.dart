@@ -5,8 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
+import '../../../core/ui/app_appearance.dart';
 import '../../../models.dart';
 import '../../../realtime.dart';
+import '../../settings/application/app_preferences.dart';
 import '../application/chat_view_models.dart';
 import '../data/chat_drafts_local_cache.dart';
 
@@ -283,6 +285,7 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
   @override
   Widget build(BuildContext context) {
     final vm = ref.watch(chatListViewModelProvider(_args));
+    final appearance = ref.watch(appPreferencesProvider).appearance;
     final items = vm.filteredChats(_searchController.text);
     final showMessageHits = vm.messageHits.isNotEmpty;
     return Scaffold(
@@ -314,7 +317,7 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
             TextField(
               controller: _searchController,
               decoration: const InputDecoration(
-                hintText: 'Search chats',
+                hintText: 'Search chats, usernames, phone',
                 prefixIcon: Icon(Icons.search_rounded),
               ),
               onChanged: (_) {
@@ -327,68 +330,74 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
               },
             ),
             SizedBox(height: context.sp(10)),
-            Row(
-              children: [
-                FilterChip(
-                  label: const Text('All'),
-                  selected: vm.activeFilter == 'all',
-                  onSelected: (_) {
-                    if (vm.activeFilter == 'all') return;
-                    ref.read(chatListViewModelProvider(_args)).setFilter('all');
-                    unawaited(_loadChats(silent: true));
-                  },
-                ),
-                SizedBox(width: context.sp(8)),
-                FilterChip(
-                  label: const Text('Pinned'),
-                  selected: vm.activeFilter == 'pinned',
-                  onSelected: (_) {
-                    if (vm.activeFilter == 'pinned') return;
-                    ref
-                        .read(chatListViewModelProvider(_args))
-                        .setFilter('pinned');
-                    unawaited(_loadChats(silent: true));
-                  },
-                ),
-                SizedBox(width: context.sp(8)),
-                FilterChip(
-                  label: const Text('Archived'),
-                  selected: vm.activeFilter == 'archived',
-                  onSelected: (_) {
-                    if (vm.activeFilter == 'archived') return;
-                    ref
-                        .read(chatListViewModelProvider(_args))
-                        .setFilter('archived');
-                    unawaited(_loadChats(silent: true));
-                  },
-                ),
-                SizedBox(width: context.sp(8)),
-                FilterChip(
-                  label: const Text('Unread'),
-                  selected: vm.activeFilter == 'unread',
-                  onSelected: (_) {
-                    if (vm.activeFilter == 'unread') return;
-                    ref
-                        .read(chatListViewModelProvider(_args))
-                        .setFilter('unread');
-                    unawaited(_loadChats(silent: true));
-                  },
-                ),
-                const Spacer(),
-                IconButton(
-                  tooltip: 'Search in messages',
-                  onPressed: vm.searchingMessages ? null : _searchInMessages,
-                  icon: vm.searchingMessages
-                      ? SizedBox(
-                          width: context.sp(16),
-                          height: context.sp(16),
-                          child: const CircularProgressIndicator(
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Icon(Icons.manage_search_rounded),
-                ),
-              ],
+            SizedBox(
+              height: context.sp(42),
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  FilterChip(
+                    label: const Text('All'),
+                    selected: vm.activeFilter == 'all',
+                    onSelected: (_) {
+                      if (vm.activeFilter == 'all') return;
+                      ref
+                          .read(chatListViewModelProvider(_args))
+                          .setFilter('all');
+                      unawaited(_loadChats(silent: true));
+                    },
+                  ),
+                  SizedBox(width: context.sp(8)),
+                  FilterChip(
+                    label: const Text('Pinned'),
+                    selected: vm.activeFilter == 'pinned',
+                    onSelected: (_) {
+                      if (vm.activeFilter == 'pinned') return;
+                      ref
+                          .read(chatListViewModelProvider(_args))
+                          .setFilter('pinned');
+                      unawaited(_loadChats(silent: true));
+                    },
+                  ),
+                  SizedBox(width: context.sp(8)),
+                  FilterChip(
+                    label: const Text('Archived'),
+                    selected: vm.activeFilter == 'archived',
+                    onSelected: (_) {
+                      if (vm.activeFilter == 'archived') return;
+                      ref
+                          .read(chatListViewModelProvider(_args))
+                          .setFilter('archived');
+                      unawaited(_loadChats(silent: true));
+                    },
+                  ),
+                  SizedBox(width: context.sp(8)),
+                  FilterChip(
+                    label: const Text('Unread'),
+                    selected: vm.activeFilter == 'unread',
+                    onSelected: (_) {
+                      if (vm.activeFilter == 'unread') return;
+                      ref
+                          .read(chatListViewModelProvider(_args))
+                          .setFilter('unread');
+                      unawaited(_loadChats(silent: true));
+                    },
+                  ),
+                  SizedBox(width: context.sp(8)),
+                  IconButton(
+                    tooltip: 'Search in messages',
+                    onPressed: vm.searchingMessages ? null : _searchInMessages,
+                    icon: vm.searchingMessages
+                        ? SizedBox(
+                            width: context.sp(16),
+                            height: context.sp(16),
+                            child: const CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(Icons.manage_search_rounded),
+                  ),
+                ],
+              ),
             ),
             Expanded(
               child: vm.loading
@@ -513,6 +522,7 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
                                   ),
                                   child: _ChatTile(
                                     chat: chat,
+                                    appearance: appearance,
                                     onTap: () async {
                                       await Navigator.of(context).push(
                                         MaterialPageRoute(
@@ -542,10 +552,16 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
 
 class _ChatTile extends StatelessWidget {
   final ChatItem chat;
+  final AppAppearanceData appearance;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
 
-  const _ChatTile({required this.chat, required this.onTap, this.onLongPress});
+  const _ChatTile({
+    required this.chat,
+    required this.appearance,
+    required this.onTap,
+    this.onLongPress,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -553,62 +569,137 @@ class _ChatTile extends StatelessWidget {
         ? chat.lastMessagePreview!
         : 'No messages yet';
     final lastTime = chat.lastMessageAt;
+    final avatarSize = appearance.compactChatList
+        ? context.sp(46)
+        : context.sp(56);
+    final verticalPadding = appearance.compactChatList
+        ? context.sp(10)
+        : context.sp(14);
 
     return Card(
-      child: ListTile(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
         onTap: onTap,
         onLongPress: onLongPress,
-        leading: CircleAvatar(
-          backgroundColor: Theme.of(
-            context,
-          ).colorScheme.primary.withValues(alpha: 0.2),
-          child: Text(
-            chat.title.isEmpty
-                ? '?'
-                : chat.title.characters.first.toUpperCase(),
-            style: const TextStyle(fontWeight: FontWeight.w700),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: context.sp(14),
+            vertical: verticalPadding,
           ),
-        ),
-        title: Text(
-          '${chat.isPinned ? '[PIN] ' : ''}${chat.title}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
-        subtitle: Text(
-          chat.isArchived ? '[Archived] $subtitle' : subtitle,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            if (lastTime != null)
-              Text(
-                '${lastTime.hour.toString().padLeft(2, '0')}:${lastTime.minute.toString().padLeft(2, '0')}',
-                style: TextStyle(
-                  fontSize: context.sp(12),
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            if (chat.unreadCount > 0)
-              Container(
-                margin: const EdgeInsets.only(top: 4),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(999),
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                child: Text(
-                  '${chat.unreadCount}',
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontWeight: FontWeight.w700,
+          child: Row(
+            children: [
+              SizedBox(
+                width: avatarSize,
+                height: avatarSize,
+                child: CircleAvatar(
+                  backgroundColor: appearance.accentColor.withValues(
+                    alpha: 0.2,
+                  ),
+                  child: Text(
+                    chat.title.isEmpty
+                        ? '?'
+                        : chat.title.characters.first.toUpperCase(),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: context.sp(18),
+                    ),
                   ),
                 ),
               ),
-          ],
+              SizedBox(width: context.sp(12)),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            chat.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: appearance.compactChatList
+                                  ? context.sp(15)
+                                  : context.sp(16),
+                            ),
+                          ),
+                        ),
+                        if (chat.isPinned)
+                          Padding(
+                            padding: EdgeInsets.only(left: context.sp(6)),
+                            child: Icon(
+                              Icons.push_pin_rounded,
+                              size: context.sp(14),
+                              color: appearance.accentColor,
+                            ),
+                          ),
+                        if (chat.isArchived)
+                          Padding(
+                            padding: EdgeInsets.only(left: context.sp(6)),
+                            child: Icon(
+                              Icons.archive_outlined,
+                              size: context.sp(14),
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                      ],
+                    ),
+                    SizedBox(height: context.sp(4)),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: appearance.compactChatList
+                            ? context.sp(12.5)
+                            : context.sp(13.5),
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(width: context.sp(12)),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (lastTime != null)
+                    Text(
+                      '${lastTime.hour.toString().padLeft(2, '0')}:${lastTime.minute.toString().padLeft(2, '0')}',
+                      style: TextStyle(
+                        fontSize: context.sp(12),
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  if (chat.unreadCount > 0)
+                    Container(
+                      margin: EdgeInsets.only(top: context.sp(6)),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: context.sp(8),
+                        vertical: context.sp(3),
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(999),
+                        color: appearance.accentColor,
+                      ),
+                      child: Text(
+                        '${chat.unreadCount}',
+                        style: TextStyle(
+                          color: const Color(0xFF111418),
+                          fontWeight: FontWeight.w700,
+                          fontSize: context.sp(11),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -935,6 +1026,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final vm = ref.watch(chatThreadViewModelProvider(_threadArgs));
+    final appearance = ref.watch(appPreferencesProvider).appearance;
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.chat.title),
@@ -966,86 +1058,110 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 ),
               ),
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: vm.loading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: EdgeInsets.symmetric(
-                      horizontal: context.sp(12),
-                      vertical: context.sp(10),
-                    ),
-                    itemCount: vm.messages.length,
-                    itemBuilder: (context, index) {
-                      final message = vm.messages[index];
-                      final mine = message.senderId == widget.me.id;
-                      return _MessageBubble(message: message, mine: mine);
-                    },
-                  ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                context.sp(10),
-                context.sp(8),
-                context.sp(10),
-                context.sp(10),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_messageController.text.trim().isNotEmpty)
-                    Padding(
-                      padding: EdgeInsets.only(bottom: context.sp(6)),
+      body: DecoratedBox(
+        decoration: BoxDecoration(gradient: appearance.chatBackgroundGradient),
+        child: Column(
+          children: [
+            Expanded(
+              child: vm.loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : vm.messages.isEmpty
+                  ? Center(
                       child: Text(
-                        'Draft is saved automatically',
+                        'No messages yet. Start the conversation.',
                         style: TextStyle(
-                          fontSize: context.sp(11),
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: context.sp(12),
+                        vertical: context.sp(10),
+                      ),
+                      itemCount: vm.messages.length,
+                      itemBuilder: (context, index) {
+                        final message = vm.messages[index];
+                        final mine = message.senderId == widget.me.id;
+                        return _MessageBubble(
+                          message: message,
+                          mine: mine,
+                          appearance: appearance,
+                        );
+                      },
                     ),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _messageController,
-                          minLines: 1,
-                          maxLines: 5,
-                          decoration: const InputDecoration(
-                            hintText: 'Message',
+            ),
+            SafeArea(
+              top: false,
+              child: Container(
+                padding: EdgeInsets.fromLTRB(
+                  context.sp(10),
+                  context.sp(8),
+                  context.sp(10),
+                  context.sp(10),
+                ),
+                decoration: BoxDecoration(
+                  color: appearance.surfaceColor.withValues(alpha: 0.94),
+                  border: Border(
+                    top: BorderSide(color: appearance.outlineColor),
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_messageController.text.trim().isNotEmpty)
+                      Padding(
+                        padding: EdgeInsets.only(bottom: context.sp(6)),
+                        child: Text(
+                          'Draft is saved automatically',
+                          style: TextStyle(
+                            fontSize: context.sp(11),
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
                           ),
-                          onChanged: _onComposerChanged,
                         ),
                       ),
-                      SizedBox(width: context.sp(8)),
-                      FilledButton(
-                        onPressed:
-                            _messageController.text.trim().isNotEmpty &&
-                                !vm.sending
-                            ? _sendMessage
-                            : null,
-                        child: vm.sending
-                            ? SizedBox(
-                                width: context.sp(16),
-                                height: context.sp(16),
-                                child: const CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.send_rounded),
-                      ),
-                    ],
-                  ),
-                ],
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _messageController,
+                            minLines: 1,
+                            maxLines: 5,
+                            decoration: const InputDecoration(
+                              hintText: 'Message',
+                            ),
+                            onChanged: _onComposerChanged,
+                          ),
+                        ),
+                        SizedBox(width: context.sp(8)),
+                        FilledButton(
+                          onPressed:
+                              _messageController.text.trim().isNotEmpty &&
+                                  !vm.sending
+                              ? _sendMessage
+                              : null,
+                          child: vm.sending
+                              ? SizedBox(
+                                  width: context.sp(16),
+                                  height: context.sp(16),
+                                  child: const CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.send_rounded),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1054,15 +1170,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 class _MessageBubble extends StatelessWidget {
   final MessageItem message;
   final bool mine;
+  final AppAppearanceData appearance;
 
-  const _MessageBubble({required this.message, required this.mine});
+  const _MessageBubble({
+    required this.message,
+    required this.mine,
+    required this.appearance,
+  });
 
   @override
   Widget build(BuildContext context) {
     final bubbleColor = mine
-        ? const Color(0xFF244E7A)
-        : const Color(0xFF1B2736);
+        ? appearance.outgoingBubbleColor
+        : appearance.incomingBubbleColor;
+    final borderColor = mine
+        ? appearance.outgoingBubbleBorderColor
+        : appearance.incomingBubbleBorderColor;
     final alignment = mine ? Alignment.centerRight : Alignment.centerLeft;
+    final textSize = context.sp(15) * appearance.messageTextScale;
+    final metaSize =
+        context.sp(11) * appearance.messageTextScale.clamp(0.95, 1.15);
     final radius = BorderRadius.only(
       topLeft: Radius.circular(context.sp(16)),
       topRight: Radius.circular(context.sp(16)),
@@ -1084,7 +1211,7 @@ class _MessageBubble extends StatelessWidget {
         decoration: BoxDecoration(
           color: bubbleColor,
           borderRadius: radius,
-          border: Border.all(color: const Color(0xFF2B3A4A)),
+          border: Border.all(color: borderColor),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -1093,14 +1220,14 @@ class _MessageBubble extends StatelessWidget {
               alignment: Alignment.centerLeft,
               child: Text(
                 message.content,
-                style: TextStyle(fontSize: context.sp(15)),
+                style: TextStyle(fontSize: textSize),
               ),
             ),
             SizedBox(height: context.sp(4)),
             Text(
               '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')} ${mine ? _statusMark(message.status) : ''}',
               style: TextStyle(
-                fontSize: context.sp(11),
+                fontSize: metaSize,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),

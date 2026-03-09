@@ -12,6 +12,8 @@ Social features stay optional and should never dominate the main UX.
 - Storage: object storage (S3-compatible) for media/voice/files
 - Mobile/Desktop/Web client: feature-based architecture (auth, dialogs, chat, calls, settings)
 - Deploy: CI/CD with canary + stable channels, health checks, migration gates
+- Database changes must ship through Alembic migrations, not runtime `create_all`
+- Chat list APIs must be query-efficient: latest message, unread counters, and chat state in a single backend path
 
 ## Rewrite phases
 
@@ -27,6 +29,7 @@ Social features stay optional and should never dominate the main UX.
 - Dedicated WS events: `message.new`, `message.update`, `message.read`, `typing`, `presence`
 - Reliable reconnect with last event cursor
 - Server-side fanout via Redis pub/sub
+- Global per-user WS channel as the primary transport, not one socket per chat
 
 ### Phase 3 - Client architecture
 
@@ -38,6 +41,7 @@ Social features stay optional and should never dominate the main UX.
   - `features/settings`
 - Unified state management (Cubit/Bloc or Riverpod)
 - Offline cache for dialogs/messages
+- User appearance/settings state in providers, shared by the whole app
 
 ### Phase 4 - Telegram-level UX
 

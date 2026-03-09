@@ -35,7 +35,22 @@ lib/src/
   `features/chats/data/chat_drafts_local_cache.dart`.
 - Chats/messages state is managed with `Riverpod` view-models in
   `features/chats/application/chat_view_models.dart`.
+- Appearance state is managed with `Riverpod` in
+  `features/settings/application/app_preferences.dart` and persisted via
+  `features/settings/data/app_preferences_store.dart`.
+- App-wide theme, chat background, bubble colors, message scale, and compact
+  inbox density now read from a single appearance model in `core/ui/app_appearance.dart`.
+
+## Review Takeaways In Progress
+
+- Replace runtime table creation with Alembic migrations and enforce migration
+  gates during deploy.
+- Optimize chat list endpoints so last message, unread count, and pinned/archive
+  state are resolved in one query path instead of client-side stitching.
+- Keep realtime on a global user WebSocket and move server fanout to Redis
+  pub/sub.
+- Continue moving non-chat state (`auth`, `profile`) to providers.
 
 ## Next step
 
-- Move auth/settings/profile state to providers and add integration tests for view-models.
+- Move auth/profile state to providers and add integration tests for view-models.

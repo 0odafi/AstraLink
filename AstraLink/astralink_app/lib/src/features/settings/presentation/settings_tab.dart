@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../api.dart';
 import '../../../core/ui/adaptive_size.dart';
+import '../../../core/ui/app_appearance.dart';
 import '../../../models.dart';
+import '../application/app_preferences.dart';
 
-class SettingsTab extends StatefulWidget {
+class SettingsTab extends ConsumerStatefulWidget {
   final AstraApi api;
   final String appVersion;
   final String updateChannel;
@@ -22,10 +25,10 @@ class SettingsTab extends StatefulWidget {
   });
 
   @override
-  State<SettingsTab> createState() => _SettingsTabState();
+  ConsumerState<SettingsTab> createState() => _SettingsTabState();
 }
 
-class _SettingsTabState extends State<SettingsTab> {
+class _SettingsTabState extends ConsumerState<SettingsTab> {
   bool _checkingUpdate = false;
   ReleaseInfo? _latest;
 
@@ -98,14 +101,148 @@ class _SettingsTabState extends State<SettingsTab> {
 
   @override
   Widget build(BuildContext context) {
+    final prefs = ref.watch(appPreferencesProvider);
+    final appearance = prefs.appearance;
     final hasUpdate =
         _latest != null &&
         _isVersionNewer(_latest!.latestVersion, widget.appVersion);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
         padding: EdgeInsets.all(context.sp(12)),
         children: [
+          Card(
+            child: Padding(
+              padding: EdgeInsets.all(context.sp(14)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Appearance',
+                    style: TextStyle(
+                      fontSize: context.sp(18),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(6)),
+                  Text(
+                    'Chat palette, message scale, and list density.',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(12)),
+                  _AppearancePreview(appearance: appearance),
+                  SizedBox(height: context.sp(16)),
+                  Text(
+                    'Surface',
+                    style: TextStyle(
+                      fontSize: context.sp(14),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(8)),
+                  Wrap(
+                    spacing: context.sp(8),
+                    runSpacing: context.sp(8),
+                    children: [
+                      for (final preset in ChatSurfacePreset.values)
+                        ChoiceChip(
+                          label: Text(preset.label),
+                          selected: appearance.chatSurfacePreset == preset,
+                          onSelected: (_) {
+                            ref
+                                .read(appPreferencesProvider)
+                                .setChatSurfacePreset(preset);
+                          },
+                        ),
+                    ],
+                  ),
+                  SizedBox(height: context.sp(16)),
+                  Text(
+                    'Accent',
+                    style: TextStyle(
+                      fontSize: context.sp(14),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(8)),
+                  Wrap(
+                    spacing: context.sp(8),
+                    runSpacing: context.sp(8),
+                    children: [
+                      for (final preset in ChatAccentPreset.values)
+                        ChoiceChip(
+                          avatar: CircleAvatar(
+                            radius: context.sp(9),
+                            backgroundColor: AppAppearanceData(
+                              chatSurfacePreset: appearance.chatSurfacePreset,
+                              chatAccentPreset: preset,
+                              messageTextScale: appearance.messageTextScale,
+                              compactChatList: appearance.compactChatList,
+                            ).accentColor,
+                          ),
+                          label: Text(preset.label),
+                          selected: appearance.chatAccentPreset == preset,
+                          onSelected: (_) {
+                            ref
+                                .read(appPreferencesProvider)
+                                .setChatAccentPreset(preset);
+                          },
+                        ),
+                    ],
+                  ),
+                  SizedBox(height: context.sp(16)),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Message text size',
+                          style: TextStyle(
+                            fontSize: context.sp(14),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '${(appearance.messageTextScale * 100).round()}%',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Slider(
+                    min: 0.9,
+                    max: 1.3,
+                    divisions: 8,
+                    value: appearance.messageTextScale,
+                    onChanged: (value) {
+                      ref
+                          .read(appPreferencesProvider)
+                          .setMessageTextScale(value);
+                    },
+                  ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Compact chat list'),
+                    subtitle: const Text(
+                      'Reduce vertical space in the chat inbox.',
+                    ),
+                    value: appearance.compactChatList,
+                    onChanged: (value) {
+                      ref
+                          .read(appPreferencesProvider)
+                          .setCompactChatList(value);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SizedBox(height: context.sp(10)),
           Card(
             child: Padding(
               padding: EdgeInsets.all(context.sp(14)),
@@ -128,10 +265,10 @@ class _SettingsTabState extends State<SettingsTab> {
                       DropdownMenuItem(value: 'stable', child: Text('stable')),
                       DropdownMenuItem(value: 'beta', child: Text('beta')),
                     ],
-                    onChanged: (value) {
+                    onChanged: (value) async {
                       if (value == null) return;
-                      widget.onUpdateChannelChanged(value);
-                      setState(() {});
+                      await widget.onUpdateChannelChanged(value);
+                      if (mounted) setState(() {});
                     },
                     decoration: const InputDecoration(labelText: 'Channel'),
                   ),
@@ -158,7 +295,10 @@ class _SettingsTabState extends State<SettingsTab> {
                     SizedBox(height: context.sp(10)),
                     Text('Latest: ${_latest!.latestVersion}'),
                     if (_latest!.notes.trim().isNotEmpty)
-                      Text('Notes: ${_latest!.notes}'),
+                      Padding(
+                        padding: EdgeInsets.only(top: context.sp(4)),
+                        child: Text('Notes: ${_latest!.notes}'),
+                      ),
                     SizedBox(height: context.sp(8)),
                     OutlinedButton(
                       onPressed: hasUpdate ? _openDownload : null,
@@ -174,6 +314,7 @@ class _SettingsTabState extends State<SettingsTab> {
             child: ListTile(
               leading: const Icon(Icons.logout_rounded),
               title: const Text('Log out'),
+              subtitle: const Text('Keep local appearance settings'),
               onTap: widget.onLogout,
             ),
           ),
@@ -183,3 +324,73 @@ class _SettingsTabState extends State<SettingsTab> {
   }
 }
 
+class _AppearancePreview extends StatelessWidget {
+  final AppAppearanceData appearance;
+
+  const _AppearancePreview({required this.appearance});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.all(context.sp(12)),
+      decoration: BoxDecoration(
+        gradient: appearance.chatBackgroundGradient,
+        borderRadius: BorderRadius.circular(context.sp(18)),
+        border: Border.all(color: appearance.outlineColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Preview',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: context.sp(14),
+            ),
+          ),
+          SizedBox(height: context.sp(12)),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Container(
+              constraints: BoxConstraints(maxWidth: context.sp(180)),
+              padding: EdgeInsets.symmetric(
+                horizontal: context.sp(12),
+                vertical: context.sp(8),
+              ),
+              decoration: BoxDecoration(
+                color: appearance.incomingBubbleColor,
+                borderRadius: BorderRadius.circular(context.sp(14)),
+                border: Border.all(color: appearance.incomingBubbleBorderColor),
+              ),
+              child: Text(
+                'Incoming bubble',
+                style: TextStyle(fontSize: context.sp(14)),
+              ),
+            ),
+          ),
+          SizedBox(height: context.sp(8)),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Container(
+              constraints: BoxConstraints(maxWidth: context.sp(190)),
+              padding: EdgeInsets.symmetric(
+                horizontal: context.sp(12),
+                vertical: context.sp(8),
+              ),
+              decoration: BoxDecoration(
+                color: appearance.outgoingBubbleColor,
+                borderRadius: BorderRadius.circular(context.sp(14)),
+                border: Border.all(color: appearance.outgoingBubbleBorderColor),
+              ),
+              child: Text(
+                'Accent bubble ${appearance.chatAccentPreset.label}',
+                textAlign: TextAlign.right,
+                style: TextStyle(fontSize: context.sp(14)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

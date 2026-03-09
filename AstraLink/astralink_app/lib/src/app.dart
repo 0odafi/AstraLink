@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import 'api.dart';
@@ -8,6 +9,7 @@ import 'core/ui/adaptive_size.dart';
 import 'core/ui/app_theme.dart';
 import 'features/auth/presentation/auth_screen.dart';
 import 'features/home/presentation/home_shell.dart';
+import 'features/settings/application/app_preferences.dart';
 import 'models.dart';
 import 'session.dart';
 
@@ -115,24 +117,29 @@ class _AstraMessengerAppState extends State<AstraMessengerApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'AstraLink',
-      debugShowCheckedModeBanner: false,
-      theme: buildAstraTheme(),
-      home: _loading
-          ? const _SplashScreen()
-          : (_tokens == null || _user == null)
-          ? AuthScreen(api: _api, onAuthorized: _onAuthorized)
-          : HomeShell(
-              api: _api,
-              getTokens: () => _tokens,
-              user: _user!,
-              appVersion: _appVersion,
-              updateChannel: _updateChannel,
-              onUserUpdated: _onUserUpdated,
-              onUpdateChannelChanged: _changeUpdateChannel,
-              onLogout: _performLogout,
-            ),
+    return Consumer(
+      builder: (context, ref, _) {
+        final appearance = ref.watch(appPreferencesProvider).appearance;
+        return MaterialApp(
+          title: 'AstraLink',
+          debugShowCheckedModeBanner: false,
+          theme: buildAstraTheme(appearance),
+          home: _loading
+              ? const _SplashScreen()
+              : (_tokens == null || _user == null)
+              ? AuthScreen(api: _api, onAuthorized: _onAuthorized)
+              : HomeShell(
+                  api: _api,
+                  getTokens: () => _tokens,
+                  user: _user!,
+                  appVersion: _appVersion,
+                  updateChannel: _updateChannel,
+                  onUserUpdated: _onUserUpdated,
+                  onUpdateChannelChanged: _changeUpdateChannel,
+                  onLogout: _performLogout,
+                ),
+        );
+      },
     );
   }
 }
@@ -166,4 +173,3 @@ class _SplashScreen extends StatelessWidget {
     );
   }
 }
-
