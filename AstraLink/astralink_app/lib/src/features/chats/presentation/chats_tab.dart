@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../api.dart';
@@ -771,17 +774,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
   final _composerFocusNode = FocusNode();
+  final AudioRecorder _audioRecorder = AudioRecorder();
 
   RealtimeMeSocket? _realtime;
   Timer? _typingPauseTimer;
   Timer? _draftDebounce;
+  Timer? _voiceTicker;
   bool _typingSent = false;
   bool _socketConnected = false;
+  bool _voiceRecording = false;
+  bool _voiceUploading = false;
   final Set<int> _typingUserIds = <int>{};
   int _realtimeCursor = 0;
   int? _replyToMessageId;
   int? _editingMessageId;
   int _attachmentSeed = 0;
+  DateTime? _voiceRecordingStartedAt;
+  Duration _voiceRecordingDuration = Duration.zero;
   List<_PendingComposerAttachment> _pendingAttachments =
       const <_PendingComposerAttachment>[];
 
@@ -827,6 +836,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _notifyTypingStopped();
     _typingPauseTimer?.cancel();
     _draftDebounce?.cancel();
+    _voiceTicker?.cancel();
+    unawaited(_audioRecorder.dispose());
     _realtime?.stop();
     _messageController.dispose();
     _scrollController.dispose();
@@ -901,14 +912,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               _readyAttachmentIds.isNotEmpty);
     return hasPayload &&
         !_sending &&
+        !_voiceRecording &&
+        !_voiceUploading &&
         !_hasUploadingAttachments &&
         !_hasFailedAttachments;
   }
 
+  bool get _canRecordVoice {
+    return !_voiceRecording &&
+        !_voiceUploading &&
+        !_sending &&
+        !_hasUploadingAttachments &&
+        _editingMessageId == null;
+  }
+
   MessageItem? _messageById(int messageId) {
-    return ref.read(chatThreadViewModelProvider(_threadArgs)).findMessageById(
-      messageId,
-    );
+    return ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .findMessageById(messageId);
   }
 
   String _buildRealtimeUrl() {
@@ -1071,9 +1092,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final chatId = map['chat_id'];
       if (chatId is! int || chatId != widget.chat.id) return;
       unawaited(
-        ref.read(chatThreadViewModelProvider(_threadArgs)).loadMessages(
-          silent: true,
-        ),
+        ref
+            .read(chatThreadViewModelProvider(_threadArgs))
+            .loadMessages(silent: true),
       );
     }
   }
@@ -1128,6 +1149,129 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       'chat_id': widget.chat.id,
       'is_typing': false,
     });
+  }
+
+  Future<void> _startVoiceRecording() async {
+    if (!_canRecordVoice) return;
+    if (kIsWeb) {
+      _showSnack('Voice messages are not available on web yet');
+      return;
+    }
+
+    final granted = await _audioRecorder.hasPermission();
+    if (!granted) {
+      _showSnack('Microphone permission denied');
+      return;
+    }
+
+    try {
+      _notifyTypingStopped();
+      _composerFocusNode.unfocus();
+      final directory = await getTemporaryDirectory();
+      final recordingPath =
+          '${directory.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await _audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+        ),
+        path: recordingPath,
+      );
+      _voiceTicker?.cancel();
+      final startedAt = DateTime.now();
+      if (!mounted) return;
+      setState(() {
+        _voiceRecording = true;
+        _voiceUploading = false;
+        _voiceRecordingStartedAt = startedAt;
+        _voiceRecordingDuration = Duration.zero;
+      });
+      _voiceTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+        final base = _voiceRecordingStartedAt;
+        if (!mounted || !_voiceRecording || base == null) return;
+        setState(() {
+          _voiceRecordingDuration = DateTime.now().difference(base);
+        });
+      });
+    } catch (error) {
+      _showSnack('Could not start voice recording');
+    }
+  }
+
+  Future<void> _cancelVoiceRecording() async {
+    if (!_voiceRecording) return;
+    try {
+      await _audioRecorder.cancel();
+    } catch (_) {
+      // Best-effort cleanup for temporary recording file.
+    }
+    _voiceTicker?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _voiceRecording = false;
+      _voiceUploading = false;
+      _voiceRecordingStartedAt = null;
+      _voiceRecordingDuration = Duration.zero;
+    });
+  }
+
+  Future<void> _finishVoiceRecording() async {
+    if (!_voiceRecording) return;
+    final tokens = widget.getTokens();
+    if (tokens == null) {
+      await _cancelVoiceRecording();
+      _showSnack('Session expired');
+      return;
+    }
+
+    String? recordingPath;
+    try {
+      recordingPath = await _audioRecorder.stop();
+    } catch (_) {
+      recordingPath = null;
+    }
+
+    _voiceTicker?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _voiceRecording = false;
+      _voiceUploading = true;
+      _voiceRecordingStartedAt = null;
+      _voiceRecordingDuration = Duration.zero;
+    });
+
+    if (recordingPath == null || recordingPath.trim().isEmpty) {
+      if (mounted) {
+        setState(() => _voiceUploading = false);
+      }
+      _showSnack('Voice message was not recorded');
+      return;
+    }
+
+    try {
+      final uploaded = await widget.api.uploadChatMedia(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: widget.chat.id,
+        fileName: 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
+        filePath: recordingPath,
+      );
+      final error = await ref
+          .read(chatThreadViewModelProvider(_threadArgs))
+          .sendMessage('', attachmentIds: <int>[uploaded.id]);
+      if (error != null) {
+        _showSnack(error);
+      } else {
+        _scrollToBottom();
+      }
+    } catch (error) {
+      _showSnack(error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => _voiceUploading = false);
+      }
+    }
   }
 
   Future<void> _sendMessage() async {
@@ -1365,15 +1509,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (tokens == null) {
       _updatePendingAttachment(
         localId,
-        (item) => item.copyWith(
-          isUploading: false,
-          errorMessage: 'Session expired',
-        ),
+        (item) =>
+            item.copyWith(isUploading: false, errorMessage: 'Session expired'),
       );
       return;
     }
 
-    final current = _pendingAttachments.where((item) => item.localId == localId);
+    final current = _pendingAttachments.where(
+      (item) => item.localId == localId,
+    );
     if (current.isEmpty) return;
 
     _updatePendingAttachment(
@@ -1455,7 +1599,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     bool? reactedByMe,
   }) async {
     final existing = message.reactions.where((item) => item.emoji == emoji);
-    final alreadyReacted = reactedByMe ?? (existing.isNotEmpty && existing.first.reactedByMe);
+    final alreadyReacted =
+        reactedByMe ?? (existing.isNotEmpty && existing.first.reactedByMe);
     final error = await ref
         .read(chatThreadViewModelProvider(_threadArgs))
         .toggleReaction(
@@ -1679,11 +1824,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           onLongPress: () => _showMessageActions(message),
                           attachmentUrlBuilder: widget.api.resolveUrl,
                           onAttachmentTap: _openAttachment,
-                          onReactionTap: (emoji, reactedByMe) => _toggleReaction(
-                            message: message,
-                            emoji: emoji,
-                            reactedByMe: reactedByMe,
-                          ),
+                          onReactionTap: (emoji, reactedByMe) =>
+                              _toggleReaction(
+                                message: message,
+                                emoji: emoji,
+                                reactedByMe: reactedByMe,
+                              ),
                         );
                       },
                     ),
@@ -1749,11 +1895,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                                   SizedBox(height: context.sp(2)),
                                   Text(
                                     (_editingMessageId != null
-                                                ? editingTarget?.content
-                                                : replyTarget?.content)
-                                            ?.trim()
-                                            .isNotEmpty ==
-                                        true
+                                                    ? editingTarget?.content
+                                                    : replyTarget?.content)
+                                                ?.trim()
+                                                .isNotEmpty ==
+                                            true
                                         ? (_editingMessageId != null
                                               ? editingTarget!.content
                                               : replyTarget!.content)
@@ -1787,14 +1933,91 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                                 attachment: attachment,
                                 appearance: appearance,
                                 resolveUrl: widget.api.resolveUrl,
-                                onRemove: () =>
-                                    _removePendingAttachment(attachment.localId),
+                                onRemove: () => _removePendingAttachment(
+                                  attachment.localId,
+                                ),
                                 onRetry: attachment.isUploading
                                     ? null
                                     : () => _retryAttachment(attachment),
                               );
                             },
                           ),
+                        ),
+                      ),
+                    if (_voiceRecording || _voiceUploading)
+                      Container(
+                        width: double.infinity,
+                        margin: EdgeInsets.only(bottom: context.sp(8)),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: context.sp(12),
+                          vertical: context.sp(10),
+                        ),
+                        decoration: BoxDecoration(
+                          color: appearance.surfaceRaisedColor,
+                          borderRadius: BorderRadius.circular(context.sp(16)),
+                          border: Border.all(color: appearance.outlineColor),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: context.sp(36),
+                              height: context.sp(36),
+                              decoration: BoxDecoration(
+                                color: appearance.accentColor.withValues(
+                                  alpha: 0.16,
+                                ),
+                                shape: BoxShape.circle,
+                              ),
+                              child: _voiceUploading
+                                  ? Padding(
+                                      padding: EdgeInsets.all(context.sp(8)),
+                                      child: const CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : Icon(
+                                      Icons.mic_rounded,
+                                      color: appearance.accentColor,
+                                    ),
+                            ),
+                            SizedBox(width: context.sp(12)),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _voiceUploading
+                                        ? 'Uploading voice message'
+                                        : 'Recording voice message',
+                                    style: TextStyle(
+                                      fontSize: context.sp(13),
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  SizedBox(height: context.sp(2)),
+                                  Text(
+                                    _voiceUploading
+                                        ? 'Please wait until upload finishes'
+                                        : _formatClockDuration(
+                                            _voiceRecordingDuration,
+                                          ),
+                                    style: TextStyle(
+                                      fontSize: context.sp(12),
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (_voiceRecording)
+                              IconButton(
+                                tooltip: 'Cancel recording',
+                                onPressed: _cancelVoiceRecording,
+                                icon: const Icon(Icons.delete_outline_rounded),
+                              ),
+                          ],
                         ),
                       ),
                     if (_messageController.text.trim().isNotEmpty)
@@ -1814,7 +2037,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                       children: [
                         IconButton.filledTonal(
                           tooltip: 'Attach files',
-                          onPressed: _editingMessageId == null
+                          onPressed:
+                              _editingMessageId == null &&
+                                  !_voiceRecording &&
+                                  !_voiceUploading
                               ? _pickAttachments
                               : null,
                           icon: const Icon(Icons.attach_file_rounded),
@@ -1826,6 +2052,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             focusNode: _composerFocusNode,
                             minLines: 1,
                             maxLines: 5,
+                            enabled: !_voiceRecording && !_voiceUploading,
                             decoration: InputDecoration(
                               hintText: _editingMessageId != null
                                   ? 'Edit message'
@@ -1833,6 +2060,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             ),
                             onChanged: _onComposerChanged,
                           ),
+                        ),
+                        SizedBox(width: context.sp(8)),
+                        IconButton.filledTonal(
+                          tooltip: _voiceRecording
+                              ? 'Stop and send voice message'
+                              : 'Record voice message',
+                          onPressed: _voiceUploading
+                              ? null
+                              : _voiceRecording
+                              ? _finishVoiceRecording
+                              : _canRecordVoice
+                              ? _startVoiceRecording
+                              : null,
+                          icon: _voiceUploading
+                              ? SizedBox(
+                                  width: context.sp(16),
+                                  height: context.sp(16),
+                                  child: const CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Icon(
+                                  _voiceRecording
+                                      ? Icons.stop_rounded
+                                      : Icons.mic_none_rounded,
+                                ),
                         ),
                         SizedBox(width: context.sp(8)),
                         FilledButton(
@@ -1992,7 +2245,11 @@ class _PendingAttachmentPlaceholder extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Icon(
-        attachment.isImage ? Icons.image_outlined : Icons.attach_file_rounded,
+        attachment.isImage
+            ? Icons.image_outlined
+            : attachment.isAudio
+            ? Icons.mic_rounded
+            : Icons.attach_file_rounded,
         size: context.sp(26),
         color: Theme.of(context).colorScheme.onSurfaceVariant,
       ),
@@ -2028,10 +2285,7 @@ class _QuickReactionButton extends StatelessWidget {
             vertical: context.sp(10),
           ),
           child: Center(
-            child: Text(
-              emoji,
-              style: TextStyle(fontSize: context.sp(22)),
-            ),
+            child: Text(emoji, style: TextStyle(fontSize: context.sp(22))),
           ),
         ),
       ),
@@ -2046,7 +2300,8 @@ class _MessageBubble extends StatelessWidget {
   final AppAppearanceData appearance;
   final VoidCallback? onLongPress;
   final String Function(String pathOrUrl) attachmentUrlBuilder;
-  final Future<void> Function(MessageAttachmentItem attachment)? onAttachmentTap;
+  final Future<void> Function(MessageAttachmentItem attachment)?
+  onAttachmentTap;
   final Future<void> Function(String emoji, bool reactedByMe)? onReactionTap;
 
   const _MessageBubble({
@@ -2226,6 +2481,14 @@ class _MessageBubble extends StatelessWidget {
                                             ),
                                           ],
                                         )
+                                      : attachment.isAudio
+                                      ? _AudioAttachmentTile(
+                                          attachment: attachment,
+                                          url: attachmentUrlBuilder(
+                                            attachment.url,
+                                          ),
+                                          appearance: appearance,
+                                        )
                                       : Row(
                                           children: [
                                             Icon(
@@ -2355,11 +2618,150 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
+class _AudioAttachmentTile extends StatefulWidget {
+  final MessageAttachmentItem attachment;
+  final String url;
+  final AppAppearanceData appearance;
+
+  const _AudioAttachmentTile({
+    required this.attachment,
+    required this.url,
+    required this.appearance,
+  });
+
+  @override
+  State<_AudioAttachmentTile> createState() => _AudioAttachmentTileState();
+}
+
+class _AudioAttachmentTileState extends State<_AudioAttachmentTile> {
+  late final AudioPlayer _player;
+  StreamSubscription<PlayerState>? _playerStateSubscription;
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<Duration>? _durationSubscription;
+  StreamSubscription<void>? _playerCompleteSubscription;
+  PlayerState _playerState = PlayerState.stopped;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = AudioPlayer();
+    _playerStateSubscription = _player.onPlayerStateChanged.listen((state) {
+      if (!mounted) return;
+      setState(() => _playerState = state);
+    });
+    _positionSubscription = _player.onPositionChanged.listen((position) {
+      if (!mounted) return;
+      setState(() => _position = position);
+    });
+    _durationSubscription = _player.onDurationChanged.listen((duration) {
+      if (!mounted) return;
+      setState(() => _duration = duration);
+    });
+    _playerCompleteSubscription = _player.onPlayerComplete.listen((_) {
+      if (!mounted) return;
+      setState(() {
+        _playerState = PlayerState.completed;
+        _position = _duration;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _playerStateSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _durationSubscription?.cancel();
+    _playerCompleteSubscription?.cancel();
+    unawaited(_player.dispose());
+    super.dispose();
+  }
+
+  Future<void> _togglePlayback() async {
+    try {
+      if (_playerState == PlayerState.playing) {
+        await _player.pause();
+        return;
+      }
+      if (_playerState == PlayerState.paused) {
+        await _player.resume();
+        return;
+      }
+      if (_playerState == PlayerState.completed) {
+        await _player.seek(Duration.zero);
+      }
+      await _player.play(UrlSource(widget.url));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not play audio attachment')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _playerState == PlayerState.playing;
+    final total = _duration.inMilliseconds <= 0
+        ? 1.0
+        : _duration.inMilliseconds.toDouble();
+    final progress = (_position.inMilliseconds / total).clamp(0.0, 1.0);
+    final shownDuration = _duration.inMilliseconds > 0 ? _duration : _position;
+
+    return Row(
+      children: [
+        IconButton.filledTonal(
+          tooltip: active ? 'Pause' : 'Play',
+          onPressed: _togglePlayback,
+          icon: Icon(active ? Icons.pause_rounded : Icons.play_arrow_rounded),
+        ),
+        SizedBox(width: context.sp(8)),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.attachment.displayLabel,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: context.sp(13) * widget.appearance.messageTextScale,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              SizedBox(height: context.sp(4)),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(999),
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: context.sp(5),
+                  backgroundColor: Colors.black.withValues(alpha: 0.08),
+                ),
+              ),
+              SizedBox(height: context.sp(4)),
+              Text(
+                '${_formatClockDuration(_position)} / ${_formatClockDuration(shownDuration)}',
+                style: TextStyle(
+                  fontSize: context.sp(11) * widget.appearance.messageTextScale,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _PendingComposerAttachment {
   final int localId;
   final String name;
   final int sizeBytes;
   final bool isImage;
+  final bool isAudio;
   final String? filePath;
   final Uint8List? bytes;
   final bool isUploading;
@@ -2371,6 +2773,7 @@ class _PendingComposerAttachment {
     required this.name,
     required this.sizeBytes,
     required this.isImage,
+    required this.isAudio,
     required this.filePath,
     required this.bytes,
     required this.isUploading,
@@ -2393,6 +2796,13 @@ class _PendingComposerAttachment {
           lowerName.endsWith('.jpeg') ||
           lowerName.endsWith('.gif') ||
           lowerName.endsWith('.webp'),
+      isAudio:
+          lowerName.endsWith('.m4a') ||
+          lowerName.endsWith('.aac') ||
+          lowerName.endsWith('.mp3') ||
+          lowerName.endsWith('.wav') ||
+          lowerName.endsWith('.ogg') ||
+          lowerName.endsWith('.oga'),
       filePath: file.path,
       bytes: file.bytes,
       isUploading: true,
@@ -2406,6 +2816,7 @@ class _PendingComposerAttachment {
     String? name,
     int? sizeBytes,
     bool? isImage,
+    bool? isAudio,
     Object? filePath = _pendingAttachmentSentinel,
     Object? bytes = _pendingAttachmentSentinel,
     bool? isUploading,
@@ -2417,6 +2828,7 @@ class _PendingComposerAttachment {
       name: name ?? this.name,
       sizeBytes: sizeBytes ?? this.sizeBytes,
       isImage: isImage ?? this.isImage,
+      isAudio: isAudio ?? this.isAudio,
       filePath: filePath == _pendingAttachmentSentinel
           ? this.filePath
           : filePath as String?,
@@ -2435,6 +2847,16 @@ class _PendingComposerAttachment {
 }
 
 const Object _pendingAttachmentSentinel = Object();
+
+String _formatClockDuration(Duration duration) {
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  final hours = duration.inHours;
+  if (hours > 0) {
+    return '${hours.toString().padLeft(2, '0')}:$minutes:$seconds';
+  }
+  return '$minutes:$seconds';
+}
 
 String _formatBytes(int bytes) {
   if (bytes >= 1024 * 1024) {

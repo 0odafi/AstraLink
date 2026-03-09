@@ -230,12 +230,15 @@ class MessageItem {
       isPinned: (json['is_pinned'] ?? false) == true,
       reactions: ((json['reactions'] as List?) ?? const [])
           .whereType<Map>()
-          .map((row) => MessageReactionItem.fromJson(row.cast<String, dynamic>()))
+          .map(
+            (row) => MessageReactionItem.fromJson(row.cast<String, dynamic>()),
+          )
           .toList(),
       attachments: ((json['attachments'] as List?) ?? const [])
           .whereType<Map>()
           .map(
-            (row) => MessageAttachmentItem.fromJson(row.cast<String, dynamic>()),
+            (row) =>
+                MessageAttachmentItem.fromJson(row.cast<String, dynamic>()),
           )
           .toList(),
     );
@@ -324,6 +327,13 @@ class MessageAttachmentItem {
       url: (json['url'] ?? '').toString(),
       isImage: (json['is_image'] ?? false) == true,
     );
+  }
+
+  bool get isAudio => mimeType.toLowerCase().startsWith('audio/');
+
+  String get displayLabel {
+    if (fileName.trim().isNotEmpty) return fileName.trim();
+    return isAudio ? 'Voice message' : 'Attachment';
   }
 }
 
