@@ -40,6 +40,8 @@ lib/src/
   `features/settings/data/app_preferences_store.dart`.
 - App-wide theme, chat background, bubble colors, message scale, and compact
   inbox density now read from a single appearance model in `core/ui/app_appearance.dart`.
+- Realtime client now persists the latest WS cursor and resumes from it after
+  reconnect via `core/realtime/realtime_cursor_store.dart`.
 
 ## Review Takeaways In Progress
 

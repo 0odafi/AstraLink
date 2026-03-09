@@ -11,6 +11,7 @@ Social features stay optional and should never dominate the main UX.
 - Startup uses migration bootstrap instead of runtime `create_all`.
 - Chat list backend resolves latest message, unread count, and pinned/archive state in one query path.
 - Realtime fanout is Redis-aware with safe local fallback when Redis is not configured.
+- Global WS now supports cursor-based replay after reconnect.
 
 ## Architecture targets
 

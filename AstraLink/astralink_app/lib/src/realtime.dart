@@ -8,7 +8,9 @@ enum RealtimeState { disconnected, connecting, connected, reconnecting }
 
 class RealtimeMeSocket {
   final String Function() urlBuilder;
+  final int? Function()? cursorGetter;
   final void Function(Map<String, dynamic> event) onEvent;
+  final void Function(int cursor)? onCursor;
   final void Function(RealtimeState state)? onState;
   final Duration pingInterval;
   final Duration maxReconnectDelay;
@@ -20,10 +22,13 @@ class RealtimeMeSocket {
   bool _stopped = true;
   int _reconnectAttempt = 0;
   RealtimeState _state = RealtimeState.disconnected;
+  int _lastCursor = 0;
 
   RealtimeMeSocket({
     required this.urlBuilder,
+    this.cursorGetter,
     required this.onEvent,
+    this.onCursor,
     this.onState,
     this.pingInterval = const Duration(seconds: 20),
     this.maxReconnectDelay = const Duration(seconds: 30),
@@ -64,7 +69,7 @@ class RealtimeMeSocket {
 
   void _connect() {
     if (_stopped) return;
-    final rawUrl = urlBuilder().trim();
+    final rawUrl = _buildUrlWithCursor(urlBuilder().trim());
     if (rawUrl.isEmpty) {
       _scheduleReconnect();
       return;
@@ -109,8 +114,31 @@ class RealtimeMeSocket {
     }
 
     if (map == null) return;
+    _captureCursor(map['cursor']);
     if ((map['type'] ?? '').toString() == 'pong') return;
     onEvent(map);
+  }
+
+  String _buildUrlWithCursor(String rawUrl) {
+    if (rawUrl.isEmpty) return rawUrl;
+    final uri = Uri.parse(rawUrl);
+    final configuredCursor = cursorGetter?.call() ?? _lastCursor;
+    if (configuredCursor <= 0) return rawUrl;
+    final nextQuery = Map<String, String>.from(uri.queryParameters);
+    nextQuery['cursor'] = '$configuredCursor';
+    return uri.replace(queryParameters: nextQuery).toString();
+  }
+
+  void _captureCursor(dynamic rawCursor) {
+    final value = switch (rawCursor) {
+      int v => v,
+      num v => v.toInt(),
+      String v => int.tryParse(v) ?? 0,
+      _ => 0,
+    };
+    if (value <= _lastCursor) return;
+    _lastCursor = value;
+    onCursor?.call(value);
   }
 
   void _startPing() {

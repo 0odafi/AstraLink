@@ -231,6 +231,43 @@ def test_chat_state_and_message_search_flow(client):
     assert any(row["chat_id"] == chat_id for row in search.json())
 
 
+def test_realtime_replay_after_disconnect(client):
+    alice = _auth_by_phone(client, "+7 900 777 22 33", "Alice", "Replay")
+    bob = _auth_by_phone(client, "+7 900 777 22 44", "Bob", "Replay")
+
+    alice_headers = _auth_headers(alice["access_token"])
+    bob_headers = _auth_headers(bob["access_token"])
+
+    open_chat = client.post(
+        f"/api/chats/private?query={quote_plus(bob['user']['username'])}",
+        headers=alice_headers,
+    )
+    assert open_chat.status_code == 200, open_chat.text
+    chat_id = open_chat.json()["id"]
+
+    with client.websocket_connect(f"/api/realtime/me/ws?token={alice['access_token']}") as alice_ws:
+        ready = alice_ws.receive_json()
+        assert ready["type"] == "ready"
+        resume_cursor = ready["latest_cursor"]
+
+    sent = client.post(
+        f"/api/chats/{chat_id}/messages",
+        headers=bob_headers,
+        json={"content": "Missed while offline"},
+    )
+    assert sent.status_code == 201, sent.text
+
+    with client.websocket_connect(
+        f"/api/realtime/me/ws?token={alice['access_token']}&cursor={resume_cursor}"
+    ) as alice_ws:
+        ready = alice_ws.receive_json()
+        assert ready["type"] == "ready"
+        replay = _recv_by_type(alice_ws, "message")
+        assert replay["chat_id"] == chat_id
+        assert replay["message"]["content"] == "Missed while offline"
+        assert replay["cursor"] > resume_cursor
+
+
 def test_refresh_and_release_endpoint(client):
     user = _auth_by_phone(client, "+7 900 555 22 33", "Refresh", "Case")
     first_refresh = user["refresh_token"]

@@ -7,7 +7,9 @@ from typing import Any
 from fastapi import WebSocket
 
 from app.core.config import get_settings
+from app.core.database import SessionLocal
 from app.realtime.manager import chat_manager, user_realtime_manager
+from app.services.realtime_service import store_realtime_event
 
 logger = logging.getLogger(__name__)
 
@@ -63,30 +65,50 @@ class RealtimeFanout:
         self,
         *,
         chat_id: int,
-        member_ids: set[int],
+        member_ids: set[int] | None,
         payload: dict,
         exclude_chat_socket: WebSocket | None = None,
     ) -> None:
-        await chat_manager.broadcast(chat_id, payload, exclude=exclude_chat_socket)
-        await user_realtime_manager.broadcast_many(member_ids, payload)
+        event_id = self._persist_event(
+            target_type="chat",
+            target_id=chat_id,
+            payload=payload,
+        )
+        payload_with_cursor = {**payload, "cursor": event_id}
+        normalized_member_ids = member_ids or set()
+        await chat_manager.broadcast(
+            chat_id,
+            payload_with_cursor,
+            exclude=exclude_chat_socket,
+        )
+        await user_realtime_manager.broadcast_many(
+            normalized_member_ids,
+            payload_with_cursor,
+        )
         await self._publish(
             {
                 "origin": self._instance_id,
                 "target": "chat",
                 "chat_id": chat_id,
-                "member_ids": sorted(member_ids),
-                "payload": payload,
+                "member_ids": sorted(normalized_member_ids),
+                "payload": payload_with_cursor,
             }
         )
 
     async def broadcast_user_event(self, *, user_id: int, payload: dict) -> None:
-        await user_realtime_manager.broadcast(user_id, payload)
+        event_id = self._persist_event(
+            target_type="user",
+            target_id=user_id,
+            payload=payload,
+        )
+        payload_with_cursor = {**payload, "cursor": event_id}
+        await user_realtime_manager.broadcast(user_id, payload_with_cursor)
         await self._publish(
             {
                 "origin": self._instance_id,
                 "target": "user",
                 "user_id": user_id,
-                "payload": payload,
+                "payload": payload_with_cursor,
             }
         )
 
@@ -156,6 +178,18 @@ class RealtimeFanout:
                 user_id = envelope.get("user_id")
                 if isinstance(user_id, int):
                     await user_realtime_manager.broadcast(user_id, payload)
+
+    def _persist_event(self, *, target_type: str, target_id: int, payload: dict) -> int:
+        db = SessionLocal()
+        try:
+            return store_realtime_event(
+                db,
+                target_type=target_type,
+                target_id=target_id,
+                payload=payload,
+            )
+        finally:
+            db.close()
 
 
 realtime_fanout = RealtimeFanout()

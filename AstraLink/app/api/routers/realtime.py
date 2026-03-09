@@ -6,6 +6,10 @@ from app.core.database import SessionLocal
 from app.models.chat import ChatMember, MessageDeliveryStatus
 from app.realtime.fanout import realtime_fanout
 from app.realtime.manager import chat_manager, user_realtime_manager
+from app.services.realtime_service import (
+    latest_realtime_cursor,
+    list_realtime_events_for_user,
+)
 from app.services.chat_service import (
     can_access_chat,
     chat_member_ids,
@@ -82,6 +86,7 @@ def _parse_ack_status(event_type: str, raw_status: object) -> MessageDeliverySta
 async def me_socket(
     websocket: WebSocket,
     token: str = Query(...),
+    cursor: int = Query(default=0, ge=0),
 ) -> None:
     user = None
     db = SessionLocal()
@@ -93,8 +98,35 @@ async def me_socket(
     finally:
         db.close()
 
-    first_connection_for_user = await user_realtime_manager.connect(user.id, websocket)
-    await websocket.send_json({"type": "ready", "user_id": user.id})
+    await websocket.accept()
+    db = SessionLocal()
+    try:
+        replay_events = list_realtime_events_for_user(
+            db,
+            user_id=user.id,
+            after_cursor=cursor,
+            limit=250,
+        )
+        latest_cursor = latest_realtime_cursor(db, user_id=user.id)
+    finally:
+        db.close()
+
+    first_connection_for_user = await user_realtime_manager.connect(
+        user.id,
+        websocket,
+        accept_socket=False,
+    )
+    await websocket.send_json(
+        {
+            "type": "ready",
+            "user_id": user.id,
+            "resume_cursor": cursor,
+            "latest_cursor": latest_cursor,
+            "replayed_count": len(replay_events),
+        }
+    )
+    for event in replay_events:
+        await websocket.send_json(event)
     if first_connection_for_user:
         await _broadcast_user_presence(user.id, "online")
 

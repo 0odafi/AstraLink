@@ -7,10 +7,18 @@ class ChatConnectionManager:
     def __init__(self) -> None:
         self._connections: dict[int, dict[WebSocket, int]] = defaultdict(dict)
 
-    async def connect(self, chat_id: int, websocket: WebSocket, user_id: int) -> bool:
+    async def connect(
+        self,
+        chat_id: int,
+        websocket: WebSocket,
+        user_id: int,
+        *,
+        accept_socket: bool = True,
+    ) -> bool:
         sockets = self._connections[chat_id]
         had_user = user_id in sockets.values()
-        await websocket.accept()
+        if accept_socket:
+            await websocket.accept()
         sockets[websocket] = user_id
         return not had_user
 
@@ -56,10 +64,17 @@ class UserConnectionManager:
     def __init__(self) -> None:
         self._connections: dict[int, set[WebSocket]] = defaultdict(set)
 
-    async def connect(self, user_id: int, websocket: WebSocket) -> bool:
+    async def connect(
+        self,
+        user_id: int,
+        websocket: WebSocket,
+        *,
+        accept_socket: bool = True,
+    ) -> bool:
         sockets = self._connections[user_id]
         is_first_connection = not sockets
-        await websocket.accept()
+        if accept_socket:
+            await websocket.accept()
         sockets.add(websocket)
         return is_first_connection
 

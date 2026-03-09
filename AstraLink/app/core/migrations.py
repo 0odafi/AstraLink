@@ -15,6 +15,7 @@ _LEGACY_CORE_TABLES = {
     "chat_members",
     "messages",
 }
+_LEGACY_BASELINE_REVISION = "20260309_000001"
 
 
 def run_migrations() -> None:
@@ -31,7 +32,8 @@ def run_migrations() -> None:
         return
 
     if not has_version_table and has_legacy_app_tables:
-        command.stamp(config, "head")
+        command.stamp(config, _LEGACY_BASELINE_REVISION)
+        command.upgrade(config, "head")
         return
 
     command.upgrade(config, "head")

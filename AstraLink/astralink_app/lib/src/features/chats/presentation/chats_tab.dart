@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api.dart';
+import '../../../core/realtime/realtime_cursor_store.dart';
 import '../../../core/ui/adaptive_size.dart';
 import '../../../core/ui/app_appearance.dart';
 import '../../../models.dart';
@@ -30,10 +31,12 @@ class ChatsTab extends ConsumerStatefulWidget {
 
 class _ChatsTabState extends ConsumerState<ChatsTab> {
   final _searchController = TextEditingController();
+  final RealtimeCursorStore _cursorStore = RealtimeCursorStore();
   late ChatListVmArgs _args;
   RealtimeMeSocket? _realtime;
   Timer? _refreshDebounce;
   bool _socketConnected = false;
+  int _realtimeCursor = 0;
 
   @override
   void initState() {
@@ -44,7 +47,7 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
       me: widget.me,
     );
     unawaited(ref.read(chatListViewModelProvider(_args)).prime());
-    _startRealtime();
+    unawaited(_bootstrapRealtime());
   }
 
   @override
@@ -58,7 +61,7 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
         me: widget.me,
       );
       unawaited(ref.read(chatListViewModelProvider(_args)).prime());
-      _startRealtime();
+      unawaited(_bootstrapRealtime());
     }
   }
 
@@ -76,11 +79,23 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
     return '${webSocketBase(widget.api.baseUrl)}/api/realtime/me/ws?token=${Uri.encodeComponent(tokens.accessToken)}';
   }
 
+  Future<void> _bootstrapRealtime() async {
+    final cursor = await _cursorStore.loadCursor(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+    );
+    if (!mounted) return;
+    _realtimeCursor = cursor;
+    _startRealtime();
+  }
+
   void _startRealtime() {
     _realtime?.stop();
     _realtime = RealtimeMeSocket(
       urlBuilder: _buildRealtimeUrl,
+      cursorGetter: () => _realtimeCursor,
       onEvent: _handleRealtimeEvent,
+      onCursor: _rememberRealtimeCursor,
       onState: (state) {
         if (!mounted) return;
         final connected = state == RealtimeState.connected;
@@ -92,6 +107,18 @@ class _ChatsTabState extends ConsumerState<ChatsTab> {
         }
       },
     )..start();
+  }
+
+  void _rememberRealtimeCursor(int cursor) {
+    if (cursor <= _realtimeCursor) return;
+    _realtimeCursor = cursor;
+    unawaited(
+      _cursorStore.saveCursor(
+        baseUrl: widget.api.baseUrl,
+        userId: widget.me.id,
+        cursor: cursor,
+      ),
+    );
   }
 
   void _handleRealtimeEvent(Map<String, dynamic> event) {
@@ -727,6 +754,7 @@ class ChatScreen extends ConsumerStatefulWidget {
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   late ChatThreadVmArgs _threadArgs;
   final ChatDraftsLocalCache _drafts = ChatDraftsLocalCache();
+  final RealtimeCursorStore _cursorStore = RealtimeCursorStore();
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
 
@@ -736,6 +764,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _typingSent = false;
   bool _socketConnected = false;
   final Set<int> _typingUserIds = <int>{};
+  int _realtimeCursor = 0;
 
   @override
   void initState() {
@@ -748,7 +777,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
     unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
     unawaited(_loadDraft());
-    _startRealtime();
+    unawaited(_bootstrapRealtime());
   }
 
   @override
@@ -766,7 +795,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       unawaited(ref.read(chatThreadViewModelProvider(_threadArgs)).prime());
       _messageController.clear();
       unawaited(_loadDraft());
-      _startRealtime();
+      unawaited(_bootstrapRealtime());
     }
   }
 
@@ -832,11 +861,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     return '${webSocketBase(widget.api.baseUrl)}/api/realtime/me/ws?token=${Uri.encodeComponent(tokens.accessToken)}';
   }
 
+  Future<void> _bootstrapRealtime() async {
+    final cursor = await _cursorStore.loadCursor(
+      baseUrl: widget.api.baseUrl,
+      userId: widget.me.id,
+    );
+    if (!mounted) return;
+    _realtimeCursor = cursor;
+    _startRealtime();
+  }
+
   void _startRealtime() {
     _realtime?.stop();
     _realtime = RealtimeMeSocket(
       urlBuilder: _buildRealtimeUrl,
+      cursorGetter: () => _realtimeCursor,
       onEvent: _handleRealtimeEvent,
+      onCursor: _rememberRealtimeCursor,
       onState: (state) {
         if (!mounted) return;
         final connected = state == RealtimeState.connected;
@@ -845,9 +886,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         }
         if (connected) {
           _ackUnreadMessages();
+          unawaited(
+            ref.read(chatThreadViewModelProvider(_threadArgs)).loadMessages(),
+          );
         }
       },
     )..start();
+  }
+
+  void _rememberRealtimeCursor(int cursor) {
+    if (cursor <= _realtimeCursor) return;
+    _realtimeCursor = cursor;
+    unawaited(
+      _cursorStore.saveCursor(
+        baseUrl: widget.api.baseUrl,
+        userId: widget.me.id,
+        cursor: cursor,
+      ),
+    );
   }
 
   bool _sendRealtime(Map<String, dynamic> payload) {
