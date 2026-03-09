@@ -11,6 +11,10 @@ APP_USER="${APP_USER:-astralink}"
 APP_GROUP="${APP_GROUP:-astralink}"
 BRANCH="${BRANCH:-master}"
 
+git_safe() {
+  git -c safe.directory="${APP_DIR}" -C "${APP_DIR}" "$@"
+}
+
 detect_source_dir() {
   if [[ -f "${APP_DIR}/pyproject.toml" ]]; then
     printf '%s\n' "${APP_DIR}"
@@ -45,9 +49,9 @@ if [[ ! -d "${APP_DIR}/.git" ]]; then
   exit 1
 fi
 
-git -C "${APP_DIR}" fetch origin
-git -C "${APP_DIR}" checkout "${BRANCH}"
-git -C "${APP_DIR}" pull --ff-only origin "${BRANCH}"
+git_safe fetch origin
+git_safe checkout "${BRANCH}"
+git_safe pull --ff-only origin "${BRANCH}"
 
 SOURCE_DIR="$(detect_source_dir)"
 ensure_compat_links "${SOURCE_DIR}"
@@ -65,4 +69,4 @@ echo
 echo "Update complete."
 echo "Python project root: ${SOURCE_DIR}"
 echo "Current revision:"
-git -C "${APP_DIR}" rev-parse --short HEAD
+git_safe rev-parse --short HEAD

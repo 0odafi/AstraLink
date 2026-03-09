@@ -62,7 +62,8 @@ recover with:
 
 ```bash
 cd /opt/astralink
-git pull --ff-only origin master
+git config --global --add safe.directory /opt/astralink
+git -c safe.directory=/opt/astralink pull --ff-only origin master
 chmod +x AstraLink/deploy/ubuntu/update_git_deploy.sh
 sudo APP_DIR=/opt/astralink bash /opt/astralink/AstraLink/deploy/ubuntu/update_git_deploy.sh
 ```
