@@ -3,9 +3,11 @@ import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -926,6 +928,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         _editingMessageId == null;
   }
 
+  bool get _supportsQuickMediaCapture {
+    if (kIsWeb) return false;
+    return defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+  }
+
   MessageItem? _messageById(int messageId) {
     return ref
         .read(chatThreadViewModelProvider(_threadArgs))
@@ -1480,6 +1488,53 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  Future<void> _showAttachOptions() async {
+    if (!_supportsQuickMediaCapture) {
+      await _pickAttachments();
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Gallery'),
+                subtitle: const Text('Pick a photo from device gallery'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_pickGalleryImage());
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Camera'),
+                subtitle: const Text('Capture a photo now'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_capturePhoto());
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.attach_file_rounded),
+                title: const Text('Files'),
+                subtitle: const Text('Browse documents and media files'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_pickAttachments());
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _pickAttachments() async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
@@ -1495,10 +1550,75 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       );
     }).toList();
 
+    _queuePendingAttachments(selected);
+  }
+
+  Future<void> _pickGalleryImage() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 92,
+    );
+    if (picked == null || !mounted) return;
+
+    final pending = await _pendingFromXFile(
+      file: picked,
+      fallbackName: 'gallery_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    );
+    if (pending == null || !mounted) return;
+    _queuePendingAttachments(<_PendingComposerAttachment>[pending]);
+  }
+
+  Future<void> _capturePhoto() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(
+      source: ImageSource.camera,
+      preferredCameraDevice: CameraDevice.rear,
+      imageQuality: 90,
+    );
+    if (picked == null || !mounted) return;
+
+    final pending = await _pendingFromXFile(
+      file: picked,
+      fallbackName: 'camera_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    );
+    if (pending == null || !mounted) return;
+    _queuePendingAttachments(<_PendingComposerAttachment>[pending]);
+  }
+
+  Future<_PendingComposerAttachment?> _pendingFromXFile({
+    required XFile file,
+    required String fallbackName,
+  }) async {
+    try {
+      final filePath = file.path.trim();
+      final bytes = kIsWeb || filePath.isEmpty
+          ? await file.readAsBytes()
+          : null;
+      final size = await file.length();
+      return _PendingComposerAttachment(
+        localId: ++_attachmentSeed,
+        name: file.name.isEmpty ? fallbackName : file.name,
+        sizeBytes: size,
+        isImage: true,
+        isAudio: false,
+        filePath: filePath.isEmpty ? null : filePath,
+        bytes: bytes,
+        isUploading: true,
+        errorMessage: null,
+        uploadedAttachment: null,
+      );
+    } catch (error) {
+      _showSnack('Could not prepare picked media');
+      return null;
+    }
+  }
+
+  void _queuePendingAttachments(List<_PendingComposerAttachment> selected) {
+    if (selected.isEmpty || !mounted) return;
     setState(() {
       _pendingAttachments = [..._pendingAttachments, ...selected];
     });
-
     for (final item in selected) {
       unawaited(_uploadAttachment(item.localId));
     }
@@ -2041,7 +2161,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                               _editingMessageId == null &&
                                   !_voiceRecording &&
                                   !_voiceUploading
-                              ? _pickAttachments
+                              ? _showAttachOptions
                               : null,
                           icon: const Icon(Icons.attach_file_rounded),
                         ),
