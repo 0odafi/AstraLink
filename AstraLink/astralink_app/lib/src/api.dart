@@ -396,6 +396,35 @@ class AstraApi {
     );
   }
 
+  Future<void> addReaction({
+    required String accessToken,
+    String? refreshToken,
+    required int messageId,
+    required String emoji,
+  }) async {
+    await _authorizedRequest(
+      'POST',
+      '/api/chats/messages/$messageId/reactions',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      body: {'emoji': emoji},
+    );
+  }
+
+  Future<void> removeReaction({
+    required String accessToken,
+    String? refreshToken,
+    required int messageId,
+    required String emoji,
+  }) async {
+    await _authorizedRequest(
+      'DELETE',
+      '/api/chats/messages/$messageId/reactions?emoji=${Uri.encodeQueryComponent(emoji)}',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+  }
+
   Future<MessageAttachmentItem> uploadChatMedia({
     required String accessToken,
     String? refreshToken,

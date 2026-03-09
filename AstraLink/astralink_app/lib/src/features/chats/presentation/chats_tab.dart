@@ -17,6 +17,15 @@ import '../../settings/application/app_preferences.dart';
 import '../application/chat_view_models.dart';
 import '../data/chat_drafts_local_cache.dart';
 
+const List<String> _kQuickReactionEmoji = <String>[
+  '👍',
+  '❤️',
+  '🔥',
+  '😂',
+  '😮',
+  '😢',
+];
+
 class ChatsTab extends ConsumerStatefulWidget {
   final AstraApi api;
   final AuthTokens? Function() getTokens;
@@ -1230,48 +1239,96 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       context: context,
       builder: (context) {
         return SafeArea(
-          child: Wrap(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              ListTile(
-                leading: const Icon(Icons.reply_rounded),
-                title: const Text('Reply'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _startReply(message);
-                },
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  context.sp(16),
+                  context.sp(12),
+                  context.sp(16),
+                  context.sp(8),
+                ),
+                child: Row(
+                  children: _kQuickReactionEmoji
+                      .map(
+                        (emoji) => Expanded(
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: context.sp(4),
+                            ),
+                            child: _QuickReactionButton(
+                              emoji: emoji,
+                              active: message.reactions.any(
+                                (reaction) =>
+                                    reaction.emoji == emoji &&
+                                    reaction.reactedByMe,
+                              ),
+                              onTap: () {
+                                Navigator.of(context).pop();
+                                unawaited(
+                                  _toggleReaction(
+                                    message: message,
+                                    emoji: emoji,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
               ),
-              if (mine)
-                ListTile(
-                  leading: const Icon(Icons.edit_outlined),
-                  title: const Text('Edit'),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _startEdit(message);
-                  },
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.reply_rounded),
+                        title: const Text('Reply'),
+                        onTap: () {
+                          Navigator.of(context).pop();
+                          _startReply(message);
+                        },
+                      ),
+                      if (mine)
+                        ListTile(
+                          leading: const Icon(Icons.edit_outlined),
+                          title: const Text('Edit'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            _startEdit(message);
+                          },
+                        ),
+                      ListTile(
+                        leading: Icon(
+                          message.isPinned
+                              ? Icons.push_pin_outlined
+                              : Icons.push_pin_rounded,
+                        ),
+                        title: Text(
+                          message.isPinned ? 'Unpin message' : 'Pin message',
+                        ),
+                        onTap: () {
+                          Navigator.of(context).pop();
+                          unawaited(_togglePin(message));
+                        },
+                      ),
+                      if (mine)
+                        ListTile(
+                          leading: const Icon(Icons.delete_outline_rounded),
+                          title: const Text('Delete'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            unawaited(_deleteMessage(message));
+                          },
+                        ),
+                    ],
+                  ),
                 ),
-              ListTile(
-                leading: Icon(
-                  message.isPinned
-                      ? Icons.push_pin_outlined
-                      : Icons.push_pin_rounded,
-                ),
-                title: Text(
-                  message.isPinned ? 'Unpin message' : 'Pin message',
-                ),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  unawaited(_togglePin(message));
-                },
               ),
-              if (mine)
-                ListTile(
-                  leading: const Icon(Icons.delete_outline_rounded),
-                  title: const Text('Delete'),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    unawaited(_deleteMessage(message));
-                  },
-                ),
             ],
           ),
         );
@@ -1389,6 +1446,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!opened) {
       _showSnack('Could not open attachment');
+    }
+  }
+
+  Future<void> _toggleReaction({
+    required MessageItem message,
+    required String emoji,
+    bool? reactedByMe,
+  }) async {
+    final existing = message.reactions.where((item) => item.emoji == emoji);
+    final alreadyReacted = reactedByMe ?? (existing.isNotEmpty && existing.first.reactedByMe);
+    final error = await ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .toggleReaction(
+          messageId: message.id,
+          emoji: emoji,
+          reactedByMe: alreadyReacted,
+        );
+    if (error != null) {
+      _showSnack(error);
     }
   }
 
@@ -1603,6 +1679,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           onLongPress: () => _showMessageActions(message),
                           attachmentUrlBuilder: widget.api.resolveUrl,
                           onAttachmentTap: _openAttachment,
+                          onReactionTap: (emoji, reactedByMe) => _toggleReaction(
+                            message: message,
+                            emoji: emoji,
+                            reactedByMe: reactedByMe,
+                          ),
                         );
                       },
                     ),
@@ -1919,6 +2000,45 @@ class _PendingAttachmentPlaceholder extends StatelessWidget {
   }
 }
 
+class _QuickReactionButton extends StatelessWidget {
+  final String emoji;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _QuickReactionButton({
+    required this.emoji,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: active
+          ? colorScheme.primary.withValues(alpha: 0.18)
+          : colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+      borderRadius: BorderRadius.circular(context.sp(14)),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(context.sp(14)),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: context.sp(10),
+            vertical: context.sp(10),
+          ),
+          child: Center(
+            child: Text(
+              emoji,
+              style: TextStyle(fontSize: context.sp(22)),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
   final MessageItem message;
   final MessageItem? repliedMessage;
@@ -1927,6 +2047,7 @@ class _MessageBubble extends StatelessWidget {
   final VoidCallback? onLongPress;
   final String Function(String pathOrUrl) attachmentUrlBuilder;
   final Future<void> Function(MessageAttachmentItem attachment)? onAttachmentTap;
+  final Future<void> Function(String emoji, bool reactedByMe)? onReactionTap;
 
   const _MessageBubble({
     required this.message,
@@ -1936,6 +2057,7 @@ class _MessageBubble extends StatelessWidget {
     this.onLongPress,
     required this.attachmentUrlBuilder,
     this.onAttachmentTap,
+    this.onReactionTap,
   });
 
   @override
@@ -2142,26 +2264,35 @@ class _MessageBubble extends StatelessWidget {
                       runSpacing: context.sp(6),
                       children: message.reactions
                           .map(
-                            (reaction) => Container(
-                              padding: EdgeInsets.symmetric(
-                                horizontal: context.sp(8),
-                                vertical: context.sp(4),
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.1),
-                                borderRadius: BorderRadius.circular(999),
-                                border: Border.all(
-                                  color: reaction.reactedByMe
-                                      ? appearance.accentColor
-                                      : borderColor,
+                            (reaction) => InkWell(
+                              borderRadius: BorderRadius.circular(999),
+                              onTap: onReactionTap == null
+                                  ? null
+                                  : () => onReactionTap!(
+                                      reaction.emoji,
+                                      reaction.reactedByMe,
+                                    ),
+                              child: Container(
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: context.sp(8),
+                                  vertical: context.sp(4),
                                 ),
-                              ),
-                              child: Text(
-                                '${reaction.emoji} ${reaction.count}',
-                                style: TextStyle(
-                                  fontSize:
-                                      context.sp(11) *
-                                      appearance.messageTextScale,
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: reaction.reactedByMe
+                                        ? appearance.accentColor
+                                        : borderColor,
+                                  ),
+                                ),
+                                child: Text(
+                                  '${reaction.emoji} ${reaction.count}',
+                                  style: TextStyle(
+                                    fontSize:
+                                        context.sp(11) *
+                                        appearance.messageTextScale,
+                                  ),
                                 ),
                               ),
                             ),

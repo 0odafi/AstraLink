@@ -415,6 +415,36 @@ class ChatThreadViewModel extends ChangeNotifier {
     }
   }
 
+  Future<String?> toggleReaction({
+    required int messageId,
+    required String emoji,
+    required bool reactedByMe,
+  }) async {
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+    try {
+      if (reactedByMe) {
+        await _api.removeReaction(
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          messageId: messageId,
+          emoji: emoji,
+        );
+      } else {
+        await _api.addReaction(
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          messageId: messageId,
+          emoji: emoji,
+        );
+      }
+      await loadMessages(silent: true);
+      return null;
+    } catch (error) {
+      return error.toString();
+    }
+  }
+
   void applyMessage(MessageItem item) {
     applyUpdatedMessage(item);
   }
