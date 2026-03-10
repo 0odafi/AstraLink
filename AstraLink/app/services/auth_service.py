@@ -241,6 +241,8 @@ def build_token_response(
 ) -> TokenResponse:
     access_token = create_access_token(str(user.id))
     refresh_token = _issue_refresh_token(db, user_id=user.id)
+    user.last_seen_at = _now_like(user.last_seen_at)
+    db.add(user)
     db.commit()
     return TokenResponse(
         access_token=access_token,

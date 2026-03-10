@@ -29,6 +29,14 @@ class MessageDeliveryStatus(str, Enum):
     READ = "read"
 
 
+class MediaKind(str, Enum):
+    FILE = "file"
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    VOICE = "voice"
+
+
 class Chat(Base):
     __tablename__ = "chats"
 
@@ -155,7 +163,18 @@ class MediaFile(Base):
     storage_name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     original_name: Mapped[str] = mapped_column(String(255))
     mime_type: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    media_kind: Mapped[MediaKind] = mapped_column(
+        SqlEnum(MediaKind),
+        default=MediaKind.FILE,
+        nullable=False,
+        index=True,
+    )
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    thumbnail_storage_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_committed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 

@@ -1,15 +1,28 @@
+from __future__ import annotations
+
 import re
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import Session, aliased
 
-from app.models.user import User
+from app.models.chat import ChatMember
+from app.models.user import (
+    BlockedUser,
+    Follow,
+    PrivacyAudience,
+    User,
+    UserDataSettings,
+    UserPrivacySettings,
+)
+from app.schemas.user import UserPublic
 
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{4,31}$")
 USERNAME_RULES_MESSAGE = (
     "Username format: 5-32 chars, start with a letter, use letters, numbers or underscore"
 )
+_ONLINE_WINDOW = timedelta(seconds=90)
 
 
 def normalize_username(value: str) -> str:
@@ -65,7 +78,236 @@ def extract_lookup_query(value: str) -> str:
     return cleaned
 
 
-def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
+def get_or_create_privacy_settings(db: Session, user_id: int) -> UserPrivacySettings:
+    settings = db.scalar(select(UserPrivacySettings).where(UserPrivacySettings.user_id == user_id))
+    if settings is not None:
+        return settings
+
+    settings = UserPrivacySettings(user_id=user_id)
+    db.add(settings)
+    db.commit()
+    db.refresh(settings)
+    return settings
+
+
+def get_or_create_data_settings(db: Session, user_id: int) -> UserDataSettings:
+    settings = db.scalar(select(UserDataSettings).where(UserDataSettings.user_id == user_id))
+    if settings is not None:
+        return settings
+
+    settings = UserDataSettings(user_id=user_id)
+    db.add(settings)
+    db.commit()
+    db.refresh(settings)
+    return settings
+
+
+def get_blocked_user_count(db: Session, user_id: int) -> int:
+    return int(
+        db.scalar(select(func.count(BlockedUser.id)).where(BlockedUser.blocker_id == user_id)) or 0
+    )
+
+
+def _has_shared_relationship(db: Session, owner_id: int, viewer_user_id: int) -> bool:
+    if owner_id == viewer_user_id:
+        return True
+
+    membership_a = aliased(ChatMember)
+    membership_b = aliased(ChatMember)
+    shared_chat = db.scalar(
+        select(membership_a.chat_id)
+        .join(membership_b, membership_b.chat_id == membership_a.chat_id)
+        .where(
+            and_(
+                membership_a.user_id == owner_id,
+                membership_b.user_id == viewer_user_id,
+            )
+        )
+        .limit(1)
+    )
+    if shared_chat is not None:
+        return True
+
+    shared_follow = db.scalar(
+        select(Follow.id)
+        .where(
+            or_(
+                and_(Follow.follower_id == owner_id, Follow.following_id == viewer_user_id),
+                and_(Follow.follower_id == viewer_user_id, Follow.following_id == owner_id),
+            )
+        )
+        .limit(1)
+    )
+    return shared_follow is not None
+
+
+def _privacy_allows(
+    audience: PrivacyAudience,
+    *,
+    owner_id: int,
+    viewer_user_id: int | None,
+    shared_relationship: bool,
+) -> bool:
+    if viewer_user_id == owner_id:
+        return True
+    if viewer_user_id is None:
+        return audience == PrivacyAudience.EVERYONE
+    if audience == PrivacyAudience.EVERYONE:
+        return True
+    if audience == PrivacyAudience.CONTACTS:
+        return shared_relationship
+    return False
+
+
+def _is_blocked_pair(db: Session, user_a_id: int, user_b_id: int) -> bool:
+    if user_a_id == user_b_id:
+        return False
+    return db.scalar(
+        select(BlockedUser.id)
+        .where(
+            or_(
+                and_(BlockedUser.blocker_id == user_a_id, BlockedUser.blocked_id == user_b_id),
+                and_(BlockedUser.blocker_id == user_b_id, BlockedUser.blocked_id == user_a_id),
+            )
+        )
+        .limit(1)
+    ) is not None
+
+
+def can_view_phone(db: Session, owner: User, viewer_user_id: int | None) -> bool:
+    if viewer_user_id == owner.id:
+        return True
+    if not owner.phone:
+        return False
+    settings = get_or_create_privacy_settings(db, owner.id)
+    shared = _has_shared_relationship(db, owner.id, viewer_user_id) if viewer_user_id is not None else False
+    return _privacy_allows(
+        settings.phone_visibility,
+        owner_id=owner.id,
+        viewer_user_id=viewer_user_id,
+        shared_relationship=shared,
+    )
+
+
+def can_find_by_phone(db: Session, owner: User, viewer_user_id: int | None) -> bool:
+    if viewer_user_id == owner.id:
+        return True
+    if not owner.phone:
+        return False
+    settings = get_or_create_privacy_settings(db, owner.id)
+    shared = _has_shared_relationship(db, owner.id, viewer_user_id) if viewer_user_id is not None else False
+    return _privacy_allows(
+        settings.phone_search_visibility,
+        owner_id=owner.id,
+        viewer_user_id=viewer_user_id,
+        shared_relationship=shared,
+    )
+
+
+def can_view_last_seen(db: Session, owner: User, viewer_user_id: int | None) -> bool:
+    if viewer_user_id == owner.id:
+        return True
+    settings = get_or_create_privacy_settings(db, owner.id)
+    shared = _has_shared_relationship(db, owner.id, viewer_user_id) if viewer_user_id is not None else False
+    return _privacy_allows(
+        settings.last_seen_visibility,
+        owner_id=owner.id,
+        viewer_user_id=viewer_user_id,
+        shared_relationship=shared,
+    )
+
+
+def touch_last_seen(db: Session, user: User) -> None:
+    now = datetime.now(UTC)
+    if user.last_seen_at is not None:
+        last_seen = user.last_seen_at if user.last_seen_at.tzinfo else user.last_seen_at.replace(tzinfo=UTC)
+        if now - last_seen < timedelta(seconds=60):
+            return
+    user.last_seen_at = now
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+
+def _format_last_seen_label(
+    *,
+    user: User,
+    viewer_user_id: int | None,
+    privacy_settings: UserPrivacySettings,
+) -> tuple[bool, datetime | None, str | None]:
+    now = datetime.now(UTC)
+    last_seen = user.last_seen_at
+    if last_seen is None:
+        return False, None, None
+
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=UTC)
+    is_online = now - last_seen <= _ONLINE_WINDOW
+    if viewer_user_id == user.id:
+        if is_online:
+            return True, last_seen, "online"
+        return False, last_seen, f"last seen at {last_seen.isoformat()}"
+
+    if privacy_settings.show_approximate_last_seen:
+        if is_online:
+            return True, None, "online"
+        delta = now - last_seen
+        if delta <= timedelta(days=3):
+            return False, None, "last seen recently"
+        if delta <= timedelta(days=7):
+            return False, None, "last seen within a week"
+        if delta <= timedelta(days=30):
+            return False, None, "last seen within a month"
+        return False, None, "last seen a long time ago"
+
+    if is_online:
+        return True, last_seen, "online"
+    return False, last_seen, f"last seen at {last_seen.isoformat()}"
+
+
+def serialize_user_public(
+    db: Session,
+    user: User,
+    *,
+    viewer_user_id: int | None,
+    include_private_fields: bool = False,
+) -> UserPublic:
+    viewer_is_self = include_private_fields or viewer_user_id == user.id
+    privacy = get_or_create_privacy_settings(db, user.id)
+
+    phone = user.phone if viewer_is_self or can_view_phone(db, user, viewer_user_id) else None
+    is_online = False
+    last_seen_at = None
+    last_seen_label = None
+    if viewer_is_self or can_view_last_seen(db, user, viewer_user_id):
+        is_online, last_seen_at, last_seen_label = _format_last_seen_label(
+            user=user,
+            viewer_user_id=viewer_user_id,
+            privacy_settings=privacy,
+        )
+
+    return UserPublic(
+        id=user.id,
+        username=user.username,
+        phone=phone,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        bio=user.bio,
+        avatar_url=user.avatar_url,
+        is_online=is_online,
+        last_seen_at=last_seen_at,
+        last_seen_label=last_seen_label,
+        created_at=user.created_at,
+    )
+
+
+def search_users(
+    db: Session,
+    query: str,
+    limit: int = 20,
+    *,
+    viewer_user_id: int | None = None,
+) -> list[User]:
     cleaned_query = extract_lookup_query(query)
     if not cleaned_query:
         return []
@@ -92,12 +334,27 @@ def search_users(db: Session, query: str, limit: int = 20) -> list[User]:
             )
         )
         .order_by(User.username.is_(None), User.username.asc(), User.first_name.asc(), User.id.asc())
-        .limit(limit)
+        .limit(limit * 3)
     )
-    return list(db.scalars(statement).all())
+    users = list(db.scalars(statement).all())
+    if phone_pattern is None:
+        return users[:limit]
+
+    visible: list[User] = []
+    for user in users:
+        if can_find_by_phone(db, user, viewer_user_id):
+            visible.append(user)
+        if len(visible) >= limit:
+            break
+    return visible
 
 
-def find_user_by_phone_or_username(db: Session, query: str) -> User | None:
+def find_user_by_phone_or_username(
+    db: Session,
+    query: str,
+    *,
+    viewer_user_id: int | None = None,
+) -> User | None:
     cleaned_query = extract_lookup_query(query)
     if not cleaned_query:
         return None
@@ -106,7 +363,7 @@ def find_user_by_phone_or_username(db: Session, query: str) -> User | None:
         try:
             normalized_phone = normalize_phone(cleaned_query)
             by_phone = db.scalar(select(User).where(User.phone == normalized_phone))
-            if by_phone:
+            if by_phone and can_find_by_phone(db, by_phone, viewer_user_id):
                 return by_phone
         except ValueError:
             pass
@@ -128,3 +385,53 @@ def ensure_username_available(db: Session, username: str, current_user_id: int |
     existing = db.scalar(select(User).where(User.username == username))
     if existing and existing.id != current_user_id:
         raise ValueError("Username is already taken")
+
+
+def ensure_private_messaging_allowed(db: Session, *, requester_id: int, target_user_id: int) -> None:
+    if requester_id == target_user_id:
+        return
+    if _is_blocked_pair(db, requester_id, target_user_id):
+        raise ValueError("Private messaging is unavailable because one of the users blocked the other")
+
+
+def list_blocked_users(db: Session, blocker_id: int) -> list[BlockedUser]:
+    return list(
+        db.scalars(
+            select(BlockedUser)
+            .where(BlockedUser.blocker_id == blocker_id)
+            .order_by(BlockedUser.created_at.desc(), BlockedUser.id.desc())
+        ).all()
+    )
+
+
+def block_user(db: Session, *, blocker_id: int, blocked_id: int) -> BlockedUser:
+    if blocker_id == blocked_id:
+        raise ValueError("You cannot block yourself")
+    target = db.scalar(select(User).where(User.id == blocked_id))
+    if target is None:
+        raise ValueError("User not found")
+    existing = db.scalar(
+        select(BlockedUser).where(
+            and_(BlockedUser.blocker_id == blocker_id, BlockedUser.blocked_id == blocked_id)
+        )
+    )
+    if existing is not None:
+        return existing
+    row = BlockedUser(blocker_id=blocker_id, blocked_id=blocked_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def unblock_user(db: Session, *, blocker_id: int, blocked_id: int) -> bool:
+    row = db.scalar(
+        select(BlockedUser).where(
+            and_(BlockedUser.blocker_id == blocker_id, BlockedUser.blocked_id == blocked_id)
+        )
+    )
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True

@@ -25,6 +25,7 @@ import '../../../realtime.dart';
 import '../../settings/application/app_preferences.dart';
 import '../application/chat_view_models.dart';
 import '../data/chat_drafts_local_cache.dart';
+import 'media_viewers.dart';
 
 const List<String> _kQuickReactionEmoji = <String>[
   '👍',
@@ -1269,6 +1270,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         chatId: widget.chat.id,
         fileName: 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
         filePath: recordingPath,
+        kindHint: 'voice',
       );
       final error = await ref
           .read(chatThreadViewModelProvider(_threadArgs))
@@ -1659,6 +1661,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         fileName: item.name,
         filePath: item.filePath,
         bytes: item.bytes,
+        kindHint: item.kindHint,
       );
       _updatePendingAttachment(
         localId,
@@ -1707,6 +1710,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _openAttachment(MessageAttachmentItem attachment) async {
+    if (attachment.isImage) {
+      await _openImageViewer(attachment);
+      return;
+    }
+    if (attachment.isVideo) {
+      await _openVideoViewer(attachment);
+      return;
+    }
+
     final resolvedUrl = widget.api.resolveUrl(attachment.url);
     final uri = Uri.tryParse(resolvedUrl);
     if (uri == null) {
@@ -1761,6 +1773,28 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
       _showSnack('Could not download attachment');
     }
+  }
+
+  Future<void> _openImageViewer(MessageAttachmentItem attachment) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => ChatPhotoViewerPage(
+          attachment: attachment,
+          imageUrl: widget.api.resolveUrl(attachment.url),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openVideoViewer(MessageAttachmentItem attachment) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => ChatVideoViewerPage(
+          attachment: attachment,
+          videoUrl: widget.api.resolveUrl(attachment.url),
+        ),
+      ),
+    );
   }
 
   Future<void> _openLocalAttachment(File file) async {
@@ -2320,6 +2354,9 @@ class _PendingAttachmentChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final uploaded = attachment.uploadedAttachment;
     final previewUrl = uploaded == null ? null : resolveUrl(uploaded.url);
+    final thumbnailUrl = uploaded?.thumbnailUrl == null
+        ? null
+        : resolveUrl(uploaded!.thumbnailUrl!);
     return Container(
       width: context.sp(140),
       padding: EdgeInsets.all(context.sp(8)),
@@ -2341,16 +2378,11 @@ class _PendingAttachmentChip extends StatelessWidget {
               child: Container(
                 width: double.infinity,
                 color: Colors.black.withValues(alpha: 0.08),
-                child: uploaded?.isImage == true && previewUrl != null
-                    ? Image.network(
-                        previewUrl,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) =>
-                            _PendingAttachmentPlaceholder(
-                              attachment: attachment,
-                            ),
-                      )
-                    : _PendingAttachmentPlaceholder(attachment: attachment),
+                child: _PendingAttachmentPreview(
+                  attachment: attachment,
+                  previewUrl: previewUrl,
+                  thumbnailUrl: thumbnailUrl,
+                ),
               ),
             ),
           ),
@@ -2424,6 +2456,75 @@ class _PendingAttachmentChip extends StatelessWidget {
   }
 }
 
+class _PendingAttachmentPreview extends StatelessWidget {
+  final _PendingComposerAttachment attachment;
+  final String? previewUrl;
+  final String? thumbnailUrl;
+
+  const _PendingAttachmentPreview({
+    required this.attachment,
+    required this.previewUrl,
+    required this.thumbnailUrl,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Widget placeholder() => _PendingAttachmentPlaceholder(attachment: attachment);
+
+    if (attachment.isImage) {
+      if (!kIsWeb && attachment.filePath != null && attachment.filePath!.isNotEmpty) {
+        return Image.file(
+          File(attachment.filePath!),
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => placeholder(),
+        );
+      }
+      if (attachment.bytes != null) {
+        return Image.memory(
+          attachment.bytes!,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => placeholder(),
+        );
+      }
+    }
+
+    if (attachment.isVideo && thumbnailUrl != null) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.network(
+            thumbnailUrl!,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) => placeholder(),
+          ),
+          Center(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.45),
+                shape: BoxShape.circle,
+              ),
+              child: const Padding(
+                padding: EdgeInsets.all(10),
+                child: Icon(Icons.play_arrow_rounded, color: Colors.white),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (attachment.uploadedAttachment?.isImage == true && previewUrl != null) {
+      return Image.network(
+        previewUrl!,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => placeholder(),
+      );
+    }
+
+    return placeholder();
+  }
+}
+
 class _PendingAttachmentPlaceholder extends StatelessWidget {
   final _PendingComposerAttachment attachment;
 
@@ -2435,6 +2536,8 @@ class _PendingAttachmentPlaceholder extends StatelessWidget {
       child: Icon(
         attachment.isImage
             ? Icons.image_outlined
+            : attachment.isVideo
+            ? Icons.smart_display_outlined
             : attachment.isAudio
             ? Icons.mic_rounded
             : Icons.attach_file_rounded,
@@ -2655,6 +2758,121 @@ class _MessageBubble extends StatelessWidget {
                                   ),
                                 ],
                               )
+                            : attachment.isVideo
+                            ? Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(
+                                      context.sp(10),
+                                    ),
+                                    child: Stack(
+                                      children: [
+                                        SizedBox(
+                                          height: context.sp(140),
+                                          width: double.infinity,
+                                          child: attachment.thumbnailUrl !=
+                                                      null &&
+                                                  attachment.thumbnailUrl!
+                                                      .trim()
+                                                      .isNotEmpty
+                                              ? CachedNetworkImage(
+                                                  imageUrl:
+                                                      attachmentUrlBuilder(
+                                                        attachment
+                                                            .thumbnailUrl!,
+                                                      ),
+                                                  fit: BoxFit.cover,
+                                                  errorWidget:
+                                                      (
+                                                        context,
+                                                        url,
+                                                        error,
+                                                      ) => _VideoAttachmentFallback(
+                                                        attachmentColor:
+                                                            attachmentColor,
+                                                        attachment: attachment,
+                                                      ),
+                                                )
+                                              : _VideoAttachmentFallback(
+                                                  attachmentColor:
+                                                      attachmentColor,
+                                                  attachment: attachment,
+                                                ),
+                                        ),
+                                        Positioned.fill(
+                                          child: Center(
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.42,
+                                                ),
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: Padding(
+                                                padding: EdgeInsets.all(
+                                                  context.sp(10),
+                                                ),
+                                                child: Icon(
+                                                  Icons.play_arrow_rounded,
+                                                  size: context.sp(28),
+                                                  color: Colors.white,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  SizedBox(height: context.sp(8)),
+                                  Text(
+                                    attachment.fileName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize:
+                                          context.sp(13) *
+                                          appearance.messageTextScale,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  if (attachment.durationSeconds != null)
+                                    Padding(
+                                      padding: EdgeInsets.only(
+                                        top: context.sp(2),
+                                      ),
+                                      child: Text(
+                                        '${_formatClockDuration(Duration(seconds: attachment.durationSeconds!))} • ${_formatBytes(attachment.sizeBytes)}',
+                                        style: TextStyle(
+                                          fontSize:
+                                              context.sp(11) *
+                                              appearance.messageTextScale,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurfaceVariant,
+                                        ),
+                                      ),
+                                    )
+                                  else
+                                    Padding(
+                                      padding: EdgeInsets.only(
+                                        top: context.sp(2),
+                                      ),
+                                      child: Text(
+                                        _formatBytes(attachment.sizeBytes),
+                                        style: TextStyle(
+                                          fontSize:
+                                              context.sp(11) *
+                                              appearance.messageTextScale,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurfaceVariant,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              )
                             : attachment.isAudio
                             ? _AudioAttachmentTile(
                                 attachment: attachment,
@@ -2688,7 +2906,7 @@ class _MessageBubble extends StatelessWidget {
                           padding: EdgeInsets.only(bottom: context.sp(6)),
                           child: InkWell(
                             borderRadius: BorderRadius.circular(context.sp(12)),
-                            onTap: onAttachmentTap == null
+                            onTap: onAttachmentTap == null || attachment.isAudio
                                 ? null
                                 : () => onAttachmentTap!(attachment),
                             child: Stack(
@@ -2987,12 +3205,55 @@ class _AudioAttachmentTileState extends State<_AudioAttachmentTile> {
   }
 }
 
+class _VideoAttachmentFallback extends StatelessWidget {
+  final Color attachmentColor;
+  final MessageAttachmentItem attachment;
+
+  const _VideoAttachmentFallback({
+    required this.attachmentColor,
+    required this.attachment,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.black.withValues(alpha: 0.08),
+      alignment: Alignment.center,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.smart_display_outlined,
+            size: context.sp(32),
+            color: attachmentColor,
+          ),
+          SizedBox(height: context.sp(8)),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: context.sp(10)),
+            child: Text(
+              attachment.previewLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: attachmentColor,
+                fontSize: context.sp(12),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _PendingComposerAttachment {
   final int localId;
   final String name;
   final int sizeBytes;
   final bool isImage;
   final bool isAudio;
+  final bool isVideo;
   final String? filePath;
   final Uint8List? bytes;
   final bool isUploading;
@@ -3005,6 +3266,7 @@ class _PendingComposerAttachment {
     required this.sizeBytes,
     required this.isImage,
     required this.isAudio,
+    required this.isVideo,
     required this.filePath,
     required this.bytes,
     required this.isUploading,
@@ -3034,6 +3296,13 @@ class _PendingComposerAttachment {
           lowerName.endsWith('.wav') ||
           lowerName.endsWith('.ogg') ||
           lowerName.endsWith('.oga'),
+      isVideo:
+          lowerName.endsWith('.mp4') ||
+          lowerName.endsWith('.mov') ||
+          lowerName.endsWith('.mkv') ||
+          lowerName.endsWith('.webm') ||
+          lowerName.endsWith('.avi') ||
+          lowerName.endsWith('.m4v'),
       filePath: file.path,
       bytes: file.bytes,
       isUploading: true,
@@ -3048,6 +3317,7 @@ class _PendingComposerAttachment {
     int? sizeBytes,
     bool? isImage,
     bool? isAudio,
+    bool? isVideo,
     Object? filePath = _pendingAttachmentSentinel,
     Object? bytes = _pendingAttachmentSentinel,
     bool? isUploading,
@@ -3060,6 +3330,7 @@ class _PendingComposerAttachment {
       sizeBytes: sizeBytes ?? this.sizeBytes,
       isImage: isImage ?? this.isImage,
       isAudio: isAudio ?? this.isAudio,
+      isVideo: isVideo ?? this.isVideo,
       filePath: filePath == _pendingAttachmentSentinel
           ? this.filePath
           : filePath as String?,
@@ -3075,6 +3346,8 @@ class _PendingComposerAttachment {
           : uploadedAttachment as MessageAttachmentItem?,
     );
   }
+
+  String? get kindHint => null;
 }
 
 const Object _pendingAttachmentSentinel = Object();

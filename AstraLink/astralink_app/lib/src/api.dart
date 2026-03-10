@@ -432,6 +432,7 @@ class AstraApi {
     required String fileName,
     String? filePath,
     Uint8List? bytes,
+    String? kindHint,
   }) async {
     final firstTry = await _uploadChatMediaRequest(
       accessToken: accessToken,
@@ -439,6 +440,7 @@ class AstraApi {
       fileName: fileName,
       filePath: filePath,
       bytes: bytes,
+      kindHint: kindHint,
     );
     if (firstTry.statusCode != 401) {
       return MessageAttachmentItem.fromJson(_jsonMap(firstTry));
@@ -461,8 +463,137 @@ class AstraApi {
       fileName: fileName,
       filePath: filePath,
       bytes: bytes,
+      kindHint: kindHint,
     );
     return MessageAttachmentItem.fromJson(_jsonMap(retried));
+  }
+
+  Future<UserSettingsBundle> mySettings({
+    required String accessToken,
+    String? refreshToken,
+  }) async {
+    final response = await _authorizedRequest(
+      'GET',
+      '/api/users/me/settings',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return UserSettingsBundle.fromJson(_jsonMap(response));
+  }
+
+  Future<UserPrivacySettings> updateMyPrivacySettings({
+    required String accessToken,
+    String? refreshToken,
+    String? phoneVisibility,
+    String? phoneSearchVisibility,
+    String? lastSeenVisibility,
+    bool? showApproximateLastSeen,
+    String? allowGroupInvites,
+  }) async {
+    final payload = <String, dynamic>{};
+    if (phoneVisibility != null) payload['phone_visibility'] = phoneVisibility;
+    if (phoneSearchVisibility != null) {
+      payload['phone_search_visibility'] = phoneSearchVisibility;
+    }
+    if (lastSeenVisibility != null) {
+      payload['last_seen_visibility'] = lastSeenVisibility;
+    }
+    if (showApproximateLastSeen != null) {
+      payload['show_approximate_last_seen'] = showApproximateLastSeen;
+    }
+    if (allowGroupInvites != null) {
+      payload['allow_group_invites'] = allowGroupInvites;
+    }
+    final response = await _authorizedRequest(
+      'PATCH',
+      '/api/users/me/settings/privacy',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      body: payload,
+    );
+    return UserPrivacySettings.fromJson(_jsonMap(response));
+  }
+
+  Future<UserDataStorageSettings> updateMyDataStorageSettings({
+    required String accessToken,
+    String? refreshToken,
+    int? keepMediaDays,
+    int? storageLimitMb,
+    bool? autoDownloadPhotos,
+    bool? autoDownloadVideos,
+    bool? autoDownloadMusic,
+    bool? autoDownloadFiles,
+    int? defaultAutoDeleteSeconds,
+  }) async {
+    final payload = <String, dynamic>{};
+    if (keepMediaDays != null) payload['keep_media_days'] = keepMediaDays;
+    if (storageLimitMb != null) payload['storage_limit_mb'] = storageLimitMb;
+    if (autoDownloadPhotos != null) {
+      payload['auto_download_photos'] = autoDownloadPhotos;
+    }
+    if (autoDownloadVideos != null) {
+      payload['auto_download_videos'] = autoDownloadVideos;
+    }
+    if (autoDownloadMusic != null) {
+      payload['auto_download_music'] = autoDownloadMusic;
+    }
+    if (autoDownloadFiles != null) {
+      payload['auto_download_files'] = autoDownloadFiles;
+    }
+    if (defaultAutoDeleteSeconds != null) {
+      payload['default_auto_delete_seconds'] = defaultAutoDeleteSeconds;
+    }
+    final response = await _authorizedRequest(
+      'PATCH',
+      '/api/users/me/settings/data-storage',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      body: payload,
+    );
+    return UserDataStorageSettings.fromJson(_jsonMap(response));
+  }
+
+  Future<List<BlockedUserItem>> blockedUsers({
+    required String accessToken,
+    String? refreshToken,
+  }) async {
+    final response = await _authorizedRequest(
+      'GET',
+      '/api/users/blocks',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return _jsonList(
+      response,
+    ).map((item) => BlockedUserItem.fromJson(item)).toList();
+  }
+
+  Future<BlockedUserItem> blockUser({
+    required String accessToken,
+    String? refreshToken,
+    required int userId,
+  }) async {
+    final response = await _authorizedRequest(
+      'POST',
+      '/api/users/blocks/$userId',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return BlockedUserItem.fromJson(_jsonMap(response));
+  }
+
+  Future<bool> unblockUser({
+    required String accessToken,
+    String? refreshToken,
+    required int userId,
+  }) async {
+    final response = await _authorizedRequest(
+      'DELETE',
+      '/api/users/blocks/$userId',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return (_jsonMap(response)['removed'] ?? false) == true;
   }
 
   Future<List<AppUser>> searchUsers({
@@ -572,6 +703,7 @@ class AstraApi {
     required String fileName,
     String? filePath,
     Uint8List? bytes,
+    String? kindHint,
   }) async {
     http.MultipartFile multipartFile;
     if (!kIsWeb && filePath != null && filePath.trim().isNotEmpty) {
@@ -590,9 +722,15 @@ class AstraApi {
       throw const ApiException('Selected file is unavailable');
     }
 
+    final query = StringBuffer('chat_id=$chatId');
+    final hint = kindHint?.trim();
+    if (hint != null && hint.isNotEmpty) {
+      query.write('&kind_hint=${Uri.encodeQueryComponent(hint)}');
+    }
+
     final request = http.MultipartRequest(
       'POST',
-      Uri.parse('$baseUrl/api/media/upload?chat_id=$chatId'),
+      Uri.parse('$baseUrl/api/media/upload?$query'),
     )
       ..headers['Accept'] = 'application/json'
       ..headers['Authorization'] = 'Bearer $accessToken'

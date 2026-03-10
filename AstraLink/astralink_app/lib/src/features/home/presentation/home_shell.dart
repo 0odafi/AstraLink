@@ -47,6 +47,7 @@ class _HomeShellState extends State<HomeShell> {
       ),
       SettingsTab(
         api: widget.api,
+        getTokens: widget.getTokens,
         appVersion: widget.appVersion,
         updateChannel: widget.updateChannel,
         onUpdateChannelChanged: widget.onUpdateChannelChanged,

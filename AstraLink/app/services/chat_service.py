@@ -10,6 +10,7 @@ from app.models.chat import (
     ChatMember,
     ChatType,
     MediaFile,
+    MediaKind,
     MemberRole,
     Message,
     MessageAttachment,
@@ -21,7 +22,7 @@ from app.models.chat import (
 )
 from app.models.user import User
 from app.schemas.chat import ChatCreate, MessageAttachmentOut, MessageOut, MessageReactionSummary
-from app.services.user_service import find_user_by_phone_or_username
+from app.services.user_service import ensure_private_messaging_allowed, find_user_by_phone_or_username
 
 
 def _user_public_label(user: User | None, fallback: str = "Unknown User") -> str:
@@ -43,6 +44,8 @@ def create_chat(db: Session, owner_id: int, payload: ChatCreate) -> Chat:
         target_user = db.scalar(select(User).where(User.id == target_user_id))
         if not target_user:
             raise ValueError("Target user does not exist")
+
+        ensure_private_messaging_allowed(db, requester_id=owner_id, target_user_id=target_user_id)
 
         existing_private = _find_private_chat_between(db, owner_id=owner_id, peer_id=target_user_id)
         if existing_private:
@@ -91,7 +94,7 @@ def _find_private_chat_between(db: Session, owner_id: int, peer_id: int) -> Chat
 
 
 def create_or_get_private_chat(db: Session, owner_id: int, query: str) -> Chat:
-    target_user = find_user_by_phone_or_username(db, query)
+    target_user = find_user_by_phone_or_username(db, query, viewer_user_id=owner_id)
     if not target_user:
         raise ValueError("User not found")
     payload = ChatCreate(
@@ -380,7 +383,9 @@ def _require_admin_or_owner(db: Session, chat_id: int, user_id: int) -> ChatMemb
     return membership
 
 
-def _media_url(storage_name: str) -> str:
+def _media_url(storage_name: str | None) -> str | None:
+    if not storage_name:
+        return None
     settings = get_settings()
     base = settings.media_url_path.rstrip("/")
     if not base:
@@ -417,11 +422,20 @@ def create_message(
     forward_from_message_id: int | None = None,
     attachment_ids: list[int] | None = None,
 ) -> Message:
-    _require_member(db, chat_id=chat_id, user_id=sender_id)
+    chat = get_chat_for_member(db, chat_id=chat_id, user_id=sender_id)
     clean_content = content.strip()
     ordered_attachment_ids = list(dict.fromkeys(attachment_ids or []))
     if not clean_content and not ordered_attachment_ids:
         raise ValueError("Message must contain text or attachment")
+
+    if chat.type == ChatType.PRIVATE:
+        peer_id = db.scalar(
+            select(ChatMember.user_id)
+            .where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id != sender_id))
+            .limit(1)
+        )
+        if peer_id is not None:
+            ensure_private_messaging_allowed(db, requester_id=sender_id, target_user_id=peer_id)
 
     if reply_to_message_id is not None:
         reply_message = db.scalar(select(Message).where(Message.id == reply_to_message_id))
@@ -604,9 +618,17 @@ def serialize_messages(db: Session, messages: list[Message], user_id: int) -> li
                 id=media.id,
                 file_name=media.original_name,
                 mime_type=mime,
+                media_kind=media.media_kind,
                 size_bytes=media.size_bytes,
-                url=_media_url(media.storage_name),
-                is_image=mime.startswith("image/"),
+                url=_media_url(media.storage_name) or "",
+                is_image=media.media_kind == MediaKind.IMAGE,
+                is_audio=media.media_kind in {MediaKind.AUDIO, MediaKind.VOICE},
+                is_video=media.media_kind == MediaKind.VIDEO,
+                is_voice=media.media_kind == MediaKind.VOICE,
+                width=media.width,
+                height=media.height,
+                duration_seconds=media.duration_seconds,
+                thumbnail_url=_media_url(media.thumbnail_storage_name),
             )
         )
 

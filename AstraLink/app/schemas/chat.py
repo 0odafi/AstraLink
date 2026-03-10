@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.chat import ChatType, MemberRole, MessageDeliveryStatus
+from app.models.chat import ChatType, MediaKind, MemberRole, MessageDeliveryStatus
 
 
 class ChatCreate(BaseModel):
@@ -68,9 +68,17 @@ class MessageAttachmentOut(BaseModel):
     id: int
     file_name: str
     mime_type: str
+    media_kind: MediaKind = MediaKind.FILE
     size_bytes: int
     url: str
     is_image: bool = False
+    is_audio: bool = False
+    is_video: bool = False
+    is_voice: bool = False
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: int | None = None
+    thumbnail_url: str | None = None
 
 
 class MessageReactionSummary(BaseModel):
@@ -122,6 +130,14 @@ class MediaUploadOut(BaseModel):
     id: int
     file_name: str
     mime_type: str
+    media_kind: MediaKind = MediaKind.FILE
     size_bytes: int
     url: str
     is_image: bool = False
+    is_audio: bool = False
+    is_video: bool = False
+    is_voice: bool = False
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: int | None = None
+    thumbnail_url: str | None = None

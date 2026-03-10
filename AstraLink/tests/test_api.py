@@ -475,3 +475,141 @@ def test_refresh_and_release_endpoint(client):
 def test_database_is_versioned_after_startup(client):
     _ = client.get("/health")
     assert "alembic_version" in set(inspect(engine).get_table_names())
+
+
+def test_release_manifest_exposes_update_contract(client):
+    windows_release = client.get('/api/releases/latest/windows')
+    assert windows_release.status_code == 200, windows_release.text
+    payload = windows_release.json()
+    assert payload['platform'] == 'windows'
+    assert payload['channel'] == 'stable'
+    assert payload['package_kind'] == 'zip'
+    assert payload['install_strategy'] == 'replace_and_restart'
+    assert payload['in_app_download_supported'] is True
+    assert payload['restart_required'] is True
+    assert 'generated_at' in payload
+
+    web_release = client.get('/api/releases/latest/web')
+    assert web_release.status_code == 200, web_release.text
+    web_payload = web_release.json()
+    assert web_payload['package_kind'] == 'bundle'
+    assert web_payload['in_app_download_supported'] is False
+    assert web_payload['restart_required'] is False
+
+
+
+def test_privacy_settings_control_phone_lookup_and_data_storage(client):
+    alice = _auth_by_phone(client, '+7 900 889 22 33', 'Alice', 'Privacy')
+    bob = _auth_by_phone(client, '+7 900 889 22 44', 'Bob', 'Privacy')
+
+    alice_headers = _auth_headers(alice['access_token'])
+    bob_headers = _auth_headers(bob['access_token'])
+
+    current = client.get('/api/users/me/settings', headers=alice_headers)
+    assert current.status_code == 200, current.text
+    current_payload = current.json()
+    assert current_payload['privacy']['phone_visibility'] == 'everyone'
+    assert current_payload['privacy']['phone_search_visibility'] == 'everyone'
+    assert current_payload['data_storage']['keep_media_days'] == 30
+    assert current_payload['blocked_users_count'] == 0
+
+    privacy = client.patch(
+        '/api/users/me/settings/privacy',
+        headers=alice_headers,
+        json={
+            'phone_visibility': 'nobody',
+            'phone_search_visibility': 'nobody',
+            'last_seen_visibility': 'contacts',
+            'show_approximate_last_seen': True,
+            'allow_group_invites': 'contacts',
+        },
+    )
+    assert privacy.status_code == 200, privacy.text
+    privacy_payload = privacy.json()
+    assert privacy_payload['phone_visibility'] == 'nobody'
+    assert privacy_payload['phone_search_visibility'] == 'nobody'
+    assert privacy_payload['last_seen_visibility'] == 'contacts'
+    assert privacy_payload['allow_group_invites'] == 'contacts'
+
+    storage = client.patch(
+        '/api/users/me/settings/data-storage',
+        headers=alice_headers,
+        json={
+            'keep_media_days': 90,
+            'storage_limit_mb': 4096,
+            'auto_download_photos': True,
+            'auto_download_videos': False,
+            'auto_download_music': True,
+            'auto_download_files': True,
+            'default_auto_delete_seconds': 604800,
+        },
+    )
+    assert storage.status_code == 200, storage.text
+    storage_payload = storage.json()
+    assert storage_payload['keep_media_days'] == 90
+    assert storage_payload['storage_limit_mb'] == 4096
+    assert storage_payload['auto_download_videos'] is False
+    assert storage_payload['auto_download_files'] is True
+    assert storage_payload['default_auto_delete_seconds'] == 604800
+
+    by_phone = client.get('/api/users/lookup', headers=bob_headers, params={'q': '+79008892233'})
+    assert by_phone.status_code == 404, by_phone.text
+
+    by_id = client.get(f"/api/users/{alice['user']['id']}", headers=bob_headers)
+    assert by_id.status_code == 200, by_id.text
+    assert by_id.json()['phone'] is None
+
+    updated_bundle = client.get('/api/users/me/settings', headers=alice_headers)
+    assert updated_bundle.status_code == 200, updated_bundle.text
+    updated_payload = updated_bundle.json()
+    assert updated_payload['privacy']['phone_visibility'] == 'nobody'
+    assert updated_payload['data_storage']['keep_media_days'] == 90
+    assert updated_payload['data_storage']['default_auto_delete_seconds'] == 604800
+
+
+
+def test_blocking_prevents_private_chat_open_and_message_send(client):
+    alice = _auth_by_phone(client, '+7 900 888 22 33', 'Alice', 'Block')
+    bob = _auth_by_phone(client, '+7 900 888 22 44', 'Bob', 'Block')
+
+    alice_headers = _auth_headers(alice['access_token'])
+    bob_headers = _auth_headers(bob['access_token'])
+
+    client.patch(
+        '/api/users/me',
+        headers=alice_headers,
+        json={'first_name': 'Alice', 'last_name': 'Block', 'username': 'alice_block'},
+    )
+    client.patch(
+        '/api/users/me',
+        headers=bob_headers,
+        json={'first_name': 'Bob', 'last_name': 'Block', 'username': 'bob_block'},
+    )
+
+    open_chat = client.post('/api/chats/private?query=alice_block', headers=bob_headers)
+    assert open_chat.status_code == 200, open_chat.text
+    chat_id = open_chat.json()['id']
+
+    blocked = client.post(f"/api/users/blocks/{bob['user']['id']}", headers=alice_headers)
+    assert blocked.status_code == 201, blocked.text
+    assert blocked.json()['user']['id'] == bob['user']['id']
+
+    blocked_users = client.get('/api/users/blocks', headers=alice_headers)
+    assert blocked_users.status_code == 200, blocked_users.text
+    assert any(row['user']['id'] == bob['user']['id'] for row in blocked_users.json())
+
+    retry_open = client.post('/api/chats/private?query=alice_block', headers=bob_headers)
+    assert retry_open.status_code == 400, retry_open.text
+    assert 'blocked' in retry_open.json()['detail'].lower()
+
+    send_message = client.post(
+        f'/api/chats/{chat_id}/messages',
+        headers=bob_headers,
+        json={'content': 'Can you see this?'},
+    )
+    assert send_message.status_code == 400, send_message.text
+    assert 'blocked' in send_message.json()['detail'].lower()
+
+    remove_block = client.delete(f"/api/users/blocks/{bob['user']['id']}", headers=alice_headers)
+    assert remove_block.status_code == 200, remove_block.text
+    assert remove_block.json() == {'removed': True}

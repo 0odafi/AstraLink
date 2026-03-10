@@ -40,4 +40,6 @@ class AstraAttachmentCache {
       }
     }
   }
+
+  Future<void> clear() => _cache.emptyCache();
 }

@@ -6,6 +6,9 @@ class AppUser {
   final String lastName;
   final String bio;
   final String? avatarUrl;
+  final bool isOnline;
+  final DateTime? lastSeenAt;
+  final String? lastSeenLabel;
 
   const AppUser({
     required this.id,
@@ -15,6 +18,9 @@ class AppUser {
     required this.lastName,
     required this.bio,
     required this.avatarUrl,
+    this.isOnline = false,
+    this.lastSeenAt,
+    this.lastSeenLabel,
   });
 
   String get displayName {
@@ -55,6 +61,11 @@ class AppUser {
       lastName: (json['last_name'] ?? '').toString(),
       bio: (json['bio'] ?? '').toString(),
       avatarUrl: json['avatar_url']?.toString(),
+      isOnline: (json['is_online'] ?? false) == true,
+      lastSeenAt: json['last_seen_at'] == null
+          ? null
+          : DateTime.tryParse(json['last_seen_at'].toString()),
+      lastSeenLabel: json['last_seen_label']?.toString(),
     );
   }
 }
@@ -305,35 +316,81 @@ class MessageAttachmentItem {
   final int id;
   final String fileName;
   final String mimeType;
+  final String mediaKind;
   final int sizeBytes;
   final String url;
   final bool isImage;
+  final bool isAudio;
+  final bool isVideo;
+  final bool isVoice;
+  final int? width;
+  final int? height;
+  final int? durationSeconds;
+  final String? thumbnailUrl;
 
   const MessageAttachmentItem({
     required this.id,
     required this.fileName,
     required this.mimeType,
+    required this.mediaKind,
     required this.sizeBytes,
     required this.url,
     required this.isImage,
+    required this.isAudio,
+    required this.isVideo,
+    required this.isVoice,
+    required this.width,
+    required this.height,
+    required this.durationSeconds,
+    required this.thumbnailUrl,
   });
 
   factory MessageAttachmentItem.fromJson(Map<String, dynamic> json) {
+    final mimeType = (json['mime_type'] ?? '').toString();
+    final normalizedMime = mimeType.toLowerCase();
+    final mediaKind = (json['media_kind'] ?? 'file').toString();
     return MessageAttachmentItem(
       id: json['id'] as int,
       fileName: (json['file_name'] ?? '').toString(),
-      mimeType: (json['mime_type'] ?? '').toString(),
+      mimeType: mimeType,
+      mediaKind: mediaKind,
       sizeBytes: (json['size_bytes'] ?? 0) as int,
       url: (json['url'] ?? '').toString(),
-      isImage: (json['is_image'] ?? false) == true,
+      isImage: (json['is_image'] ?? mediaKind == 'image') == true,
+      isAudio: (json['is_audio'] ??
+              mediaKind == 'audio' ||
+              mediaKind == 'voice' ||
+              normalizedMime.startsWith('audio/')) ==
+          true,
+      isVideo: (json['is_video'] ??
+              mediaKind == 'video' ||
+              normalizedMime.startsWith('video/')) ==
+          true,
+      isVoice: (json['is_voice'] ?? mediaKind == 'voice') == true,
+      width: json['width'] as int?,
+      height: json['height'] as int?,
+      durationSeconds: json['duration_seconds'] as int?,
+      thumbnailUrl: json['thumbnail_url']?.toString(),
     );
   }
 
-  bool get isAudio => mimeType.toLowerCase().startsWith('audio/');
-
   String get displayLabel {
     if (fileName.trim().isNotEmpty) return fileName.trim();
-    return isAudio ? 'Voice message' : 'Attachment';
+    return isVoice
+        ? 'Voice message'
+        : isAudio
+        ? 'Audio'
+        : isVideo
+        ? 'Video'
+        : 'Attachment';
+  }
+
+  String get previewLabel {
+    if (isVoice) return 'Voice message';
+    if (isVideo) return 'Video';
+    if (isAudio) return 'Audio';
+    if (isImage) return 'Photo';
+    return 'File';
   }
 }
 
@@ -359,32 +416,155 @@ const Object _sentinel = Object();
 class ReleaseInfo {
   final String platform;
   final String channel;
+  final String? generatedAt;
   final String latestVersion;
   final String minimumSupportedVersion;
   final bool mandatory;
   final String downloadUrl;
   final String notes;
+  final String packageKind;
+  final String installStrategy;
+  final bool inAppDownloadSupported;
+  final bool restartRequired;
+  final int? fileSizeBytes;
+  final String? sha256;
 
   const ReleaseInfo({
     required this.platform,
     required this.channel,
+    required this.generatedAt,
     required this.latestVersion,
     required this.minimumSupportedVersion,
     required this.mandatory,
     required this.downloadUrl,
     required this.notes,
+    required this.packageKind,
+    required this.installStrategy,
+    required this.inAppDownloadSupported,
+    required this.restartRequired,
+    required this.fileSizeBytes,
+    required this.sha256,
   });
 
   factory ReleaseInfo.fromJson(Map<String, dynamic> json) {
     return ReleaseInfo(
       platform: (json['platform'] ?? '').toString(),
       channel: (json['channel'] ?? 'stable').toString(),
+      generatedAt: json['generated_at']?.toString(),
       latestVersion: (json['latest_version'] ?? '').toString(),
       minimumSupportedVersion: (json['minimum_supported_version'] ?? '')
           .toString(),
       mandatory: (json['mandatory'] ?? false) as bool,
       downloadUrl: (json['download_url'] ?? '').toString(),
       notes: (json['notes'] ?? '').toString(),
+      packageKind: (json['package_kind'] ?? 'package').toString(),
+      installStrategy: (json['install_strategy'] ?? 'external').toString(),
+      inAppDownloadSupported: (json['in_app_download_supported'] ?? false) == true,
+      restartRequired: (json['restart_required'] ?? true) == true,
+      fileSizeBytes: json['file_size_bytes'] as int?,
+      sha256: json['sha256']?.toString(),
+    );
+  }
+}
+
+class UserPrivacySettings {
+  final String phoneVisibility;
+  final String phoneSearchVisibility;
+  final String lastSeenVisibility;
+  final bool showApproximateLastSeen;
+  final String allowGroupInvites;
+
+  const UserPrivacySettings({
+    required this.phoneVisibility,
+    required this.phoneSearchVisibility,
+    required this.lastSeenVisibility,
+    required this.showApproximateLastSeen,
+    required this.allowGroupInvites,
+  });
+
+  factory UserPrivacySettings.fromJson(Map<String, dynamic> json) {
+    return UserPrivacySettings(
+      phoneVisibility: (json['phone_visibility'] ?? 'everyone').toString(),
+      phoneSearchVisibility:
+          (json['phone_search_visibility'] ?? 'everyone').toString(),
+      lastSeenVisibility: (json['last_seen_visibility'] ?? 'everyone')
+          .toString(),
+      showApproximateLastSeen:
+          (json['show_approximate_last_seen'] ?? true) == true,
+      allowGroupInvites:
+          (json['allow_group_invites'] ?? 'everyone').toString(),
+    );
+  }
+}
+
+class UserDataStorageSettings {
+  final int keepMediaDays;
+  final int storageLimitMb;
+  final bool autoDownloadPhotos;
+  final bool autoDownloadVideos;
+  final bool autoDownloadMusic;
+  final bool autoDownloadFiles;
+  final int? defaultAutoDeleteSeconds;
+
+  const UserDataStorageSettings({
+    required this.keepMediaDays,
+    required this.storageLimitMb,
+    required this.autoDownloadPhotos,
+    required this.autoDownloadVideos,
+    required this.autoDownloadMusic,
+    required this.autoDownloadFiles,
+    required this.defaultAutoDeleteSeconds,
+  });
+
+  factory UserDataStorageSettings.fromJson(Map<String, dynamic> json) {
+    return UserDataStorageSettings(
+      keepMediaDays: (json['keep_media_days'] ?? 30) as int,
+      storageLimitMb: (json['storage_limit_mb'] ?? 2048) as int,
+      autoDownloadPhotos: (json['auto_download_photos'] ?? true) == true,
+      autoDownloadVideos: (json['auto_download_videos'] ?? true) == true,
+      autoDownloadMusic: (json['auto_download_music'] ?? true) == true,
+      autoDownloadFiles: (json['auto_download_files'] ?? false) == true,
+      defaultAutoDeleteSeconds: json['default_auto_delete_seconds'] as int?,
+    );
+  }
+}
+
+class UserSettingsBundle {
+  final UserPrivacySettings privacy;
+  final UserDataStorageSettings dataStorage;
+  final int blockedUsersCount;
+
+  const UserSettingsBundle({
+    required this.privacy,
+    required this.dataStorage,
+    required this.blockedUsersCount,
+  });
+
+  factory UserSettingsBundle.fromJson(Map<String, dynamic> json) {
+    return UserSettingsBundle(
+      privacy: UserPrivacySettings.fromJson(
+        (json['privacy'] as Map?)?.cast<String, dynamic>() ?? const {},
+      ),
+      dataStorage: UserDataStorageSettings.fromJson(
+        (json['data_storage'] as Map?)?.cast<String, dynamic>() ?? const {},
+      ),
+      blockedUsersCount: (json['blocked_users_count'] ?? 0) as int,
+    );
+  }
+}
+
+class BlockedUserItem {
+  final AppUser user;
+  final DateTime blockedAt;
+
+  const BlockedUserItem({required this.user, required this.blockedAt});
+
+  factory BlockedUserItem.fromJson(Map<String, dynamic> json) {
+    return BlockedUserItem(
+      user: AppUser.fromJson(
+        (json['user'] as Map?)?.cast<String, dynamic>() ?? const {},
+      ),
+      blockedAt: DateTime.parse((json['blocked_at'] ?? '').toString()),
     );
   }
 }
