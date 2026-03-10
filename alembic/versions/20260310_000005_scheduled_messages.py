@@ -22,12 +22,26 @@ scheduled_message_mode = sa.Enum(
     "when_online",
     name="scheduledmessagemode",
 )
+scheduled_message_mode_reuse = sa.Enum(
+    "at_time",
+    "when_online",
+    name="scheduledmessagemode",
+    create_type=False,
+)
 scheduled_message_status = sa.Enum(
     "pending",
     "dispatched",
     "canceled",
     "failed",
     name="scheduledmessagestatus",
+)
+scheduled_message_status_reuse = sa.Enum(
+    "pending",
+    "dispatched",
+    "canceled",
+    "failed",
+    name="scheduledmessagestatus",
+    create_type=False,
 )
 
 
@@ -58,8 +72,8 @@ def upgrade() -> None:
             sa.Column("sender_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
             sa.Column("target_user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
             sa.Column("content", sa.Text(), nullable=False, server_default=""),
-            sa.Column("mode", scheduled_message_mode, nullable=False, server_default="at_time"),
-            sa.Column("status", scheduled_message_status, nullable=False, server_default="pending"),
+            sa.Column("mode", scheduled_message_mode_reuse, nullable=False, server_default="at_time"),
+            sa.Column("status", scheduled_message_status_reuse, nullable=False, server_default="pending"),
             sa.Column("send_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("reply_to_message_id", sa.Integer(), sa.ForeignKey("messages.id", ondelete="SET NULL"), nullable=True),
             sa.Column(

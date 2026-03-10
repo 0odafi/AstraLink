@@ -18,7 +18,23 @@ depends_on: Sequence[str] | None = None
 
 
 media_kind = sa.Enum("file", "image", "video", "audio", "voice", name="mediakind")
+media_kind_reuse = sa.Enum(
+    "file",
+    "image",
+    "video",
+    "audio",
+    "voice",
+    name="mediakind",
+    create_type=False,
+)
 privacy_audience = sa.Enum("everyone", "contacts", "nobody", name="privacyaudience")
+privacy_audience_reuse = sa.Enum(
+    "everyone",
+    "contacts",
+    "nobody",
+    name="privacyaudience",
+    create_type=False,
+)
 
 
 def _table_names(bind) -> set[str]:
@@ -54,7 +70,9 @@ def upgrade() -> None:
         media_indexes = _index_names(bind, "media_files")
         with op.batch_alter_table("media_files") as batch_op:
             if "media_kind" not in media_columns:
-                batch_op.add_column(sa.Column("media_kind", media_kind, nullable=False, server_default="file"))
+                batch_op.add_column(
+                    sa.Column("media_kind", media_kind_reuse, nullable=False, server_default="file")
+                )
             if "sha256" not in media_columns:
                 batch_op.add_column(sa.Column("sha256", sa.String(length=64), nullable=True))
             if "width" not in media_columns:
@@ -81,11 +99,11 @@ def upgrade() -> None:
             "user_privacy_settings",
             sa.Column("id", sa.Integer(), primary_key=True),
             sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-            sa.Column("phone_visibility", privacy_audience, nullable=False, server_default="everyone"),
-            sa.Column("phone_search_visibility", privacy_audience, nullable=False, server_default="everyone"),
-            sa.Column("last_seen_visibility", privacy_audience, nullable=False, server_default="everyone"),
+            sa.Column("phone_visibility", privacy_audience_reuse, nullable=False, server_default="everyone"),
+            sa.Column("phone_search_visibility", privacy_audience_reuse, nullable=False, server_default="everyone"),
+            sa.Column("last_seen_visibility", privacy_audience_reuse, nullable=False, server_default="everyone"),
             sa.Column("show_approximate_last_seen", sa.Boolean(), nullable=False, server_default=sa.true()),
-            sa.Column("allow_group_invites", privacy_audience, nullable=False, server_default="everyone"),
+            sa.Column("allow_group_invites", privacy_audience_reuse, nullable=False, server_default="everyone"),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
             sa.UniqueConstraint("user_id", name="uq_user_privacy_settings_user"),
