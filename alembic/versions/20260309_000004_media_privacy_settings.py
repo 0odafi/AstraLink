@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision: str = "20260309_000004"
@@ -17,8 +18,8 @@ branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
 
-media_kind = sa.Enum("file", "image", "video", "audio", "voice", name="mediakind")
-media_kind_reuse = sa.Enum(
+media_kind = postgresql.ENUM("file", "image", "video", "audio", "voice", name="mediakind")
+media_kind_reuse = postgresql.ENUM(
     "file",
     "image",
     "video",
@@ -27,8 +28,8 @@ media_kind_reuse = sa.Enum(
     name="mediakind",
     create_type=False,
 )
-privacy_audience = sa.Enum("everyone", "contacts", "nobody", name="privacyaudience")
-privacy_audience_reuse = sa.Enum(
+privacy_audience = postgresql.ENUM("everyone", "contacts", "nobody", name="privacyaudience")
+privacy_audience_reuse = postgresql.ENUM(
     "everyone",
     "contacts",
     "nobody",

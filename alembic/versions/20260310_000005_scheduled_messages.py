@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision: str = "20260310_000005"
@@ -17,25 +18,25 @@ branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
 
-scheduled_message_mode = sa.Enum(
+scheduled_message_mode = postgresql.ENUM(
     "at_time",
     "when_online",
     name="scheduledmessagemode",
 )
-scheduled_message_mode_reuse = sa.Enum(
+scheduled_message_mode_reuse = postgresql.ENUM(
     "at_time",
     "when_online",
     name="scheduledmessagemode",
     create_type=False,
 )
-scheduled_message_status = sa.Enum(
+scheduled_message_status = postgresql.ENUM(
     "pending",
     "dispatched",
     "canceled",
     "failed",
     name="scheduledmessagestatus",
 )
-scheduled_message_status_reuse = sa.Enum(
+scheduled_message_status_reuse = postgresql.ENUM(
     "pending",
     "dispatched",
     "canceled",
