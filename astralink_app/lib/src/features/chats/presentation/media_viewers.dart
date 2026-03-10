@@ -2,9 +2,11 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../models.dart';
+import '../../audio/application/chat_audio_playback_controller.dart';
 
 class ChatPhotoViewerPage extends StatelessWidget {
   final MessageAttachmentItem attachment;
@@ -198,8 +200,10 @@ class _ChatVideoViewerPageState extends State<ChatVideoViewerPage> {
           final safeDuration = duration.inMilliseconds <= 0
               ? 1.0
               : duration.inMilliseconds.toDouble();
-          final progress =
-              (position.inMilliseconds / safeDuration).clamp(0.0, 1.0);
+          final progress = (position.inMilliseconds / safeDuration).clamp(
+            0.0,
+            1.0,
+          );
 
           return GestureDetector(
             onTap: _toggleChrome,
@@ -242,7 +246,8 @@ class _ChatVideoViewerPageState extends State<ChatVideoViewerPage> {
                                 child: Row(
                                   children: [
                                     IconButton(
-                                      onPressed: () => Navigator.of(context).pop(),
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
                                       icon: const Icon(
                                         Icons.arrow_back_rounded,
                                         color: Colors.white,
@@ -267,8 +272,9 @@ class _ChatVideoViewerPageState extends State<ChatVideoViewerPage> {
                               Center(
                                 child: IconButton.filled(
                                   style: IconButton.styleFrom(
-                                    backgroundColor:
-                                        Colors.black.withValues(alpha: 0.45),
+                                    backgroundColor: Colors.black.withValues(
+                                      alpha: 0.45,
+                                    ),
                                     foregroundColor: Colors.white,
                                     iconSize: 34,
                                     padding: const EdgeInsets.all(16),
@@ -283,7 +289,12 @@ class _ChatVideoViewerPageState extends State<ChatVideoViewerPage> {
                               ),
                               const Spacer(),
                               Padding(
-                                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  0,
+                                  16,
+                                  16,
+                                ),
                                 child: Column(
                                   children: [
                                     Row(
@@ -308,14 +319,17 @@ class _ChatVideoViewerPageState extends State<ChatVideoViewerPage> {
                                         thumbShape: const RoundSliderThumbShape(
                                           enabledThumbRadius: 6,
                                         ),
-                                        overlayShape: SliderComponentShape.noOverlay,
+                                        overlayShape:
+                                            SliderComponentShape.noOverlay,
                                       ),
                                       child: Slider(
                                         value: progress,
                                         onChanged: (value) {
                                           final target = Duration(
-                                            milliseconds: (duration.inMilliseconds * value)
-                                                .round(),
+                                            milliseconds:
+                                                (duration.inMilliseconds *
+                                                        value)
+                                                    .round(),
                                           );
                                           _controller.seekTo(target);
                                           _showChromeTemporarily();
@@ -353,10 +367,246 @@ class _ChatVideoViewerPageState extends State<ChatVideoViewerPage> {
       parts.add('${attachment.width}x${attachment.height}');
     }
     if (attachment.durationSeconds != null) {
-      parts.add(_formatDuration(Duration(seconds: attachment.durationSeconds!)));
+      parts.add(
+        _formatDuration(Duration(seconds: attachment.durationSeconds!)),
+      );
     }
     parts.add(_formatBytes(attachment.sizeBytes));
     return parts.join(' • ');
+  }
+}
+
+class ChatAudioPlayerPage extends ConsumerStatefulWidget {
+  final List<ChatAudioQueueItem>? queue;
+  final int? initialIndex;
+
+  const ChatAudioPlayerPage({super.key, this.queue, this.initialIndex});
+
+  @override
+  ConsumerState<ChatAudioPlayerPage> createState() =>
+      _ChatAudioPlayerPageState();
+}
+
+class _ChatAudioPlayerPageState extends ConsumerState<ChatAudioPlayerPage> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final queue = widget.queue;
+      if (queue == null || queue.isEmpty) {
+        return;
+      }
+      final safeIndex = (widget.initialIndex ?? 0)
+          .clamp(0, queue.length - 1)
+          .toInt();
+      final playback = ref.read(chatAudioPlaybackProvider);
+      final shouldAutoplay =
+          !(playback.sameQueue(queue) &&
+              playback.currentIndex == safeIndex &&
+              playback.currentItem?.attachment.id ==
+                  queue[safeIndex].attachment.id);
+      unawaited(
+        playback.setQueue(
+          queue,
+          initialIndex: safeIndex,
+          autoPlay: shouldAutoplay,
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final playback = ref.watch(chatAudioPlaybackProvider);
+    final current = playback.currentItem;
+    if (current == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Audio player')),
+        body: const Center(child: Text('No active audio queue')),
+      );
+    }
+
+    final shownDuration = playback.effectiveDuration;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          current.attachment.isVoice ? 'Voice messages' : 'Audio player',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await playback.cyclePlaybackRate();
+            },
+            child: Text(
+              '${playback.playbackRate.toStringAsFixed(playback.playbackRate.truncateToDouble() == playback.playbackRate ? 0 : 2)}x',
+            ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  children: [
+                    const Spacer(),
+                    CircleAvatar(
+                      radius: 56,
+                      child: Icon(
+                        current.attachment.isVoice
+                            ? Icons.mic_rounded
+                            : Icons.graphic_eq_rounded,
+                        size: 48,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      current.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      current.subtitle,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (playback.errorText != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        playback.errorText!,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        Text(_formatDuration(playback.position)),
+                        const Spacer(),
+                        Text(_formatDuration(shownDuration)),
+                      ],
+                    ),
+                    Slider(
+                      value: playback.progress,
+                      onChanged: (value) async {
+                        await playback.seekToFraction(value);
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton.filledTonal(
+                          onPressed: playback.canSkipPrevious
+                              ? () async {
+                                  await playback.skipPrevious();
+                                }
+                              : null,
+                          icon: const Icon(Icons.skip_previous_rounded),
+                        ),
+                        const SizedBox(width: 16),
+                        IconButton.filled(
+                          style: IconButton.styleFrom(
+                            padding: const EdgeInsets.all(18),
+                            iconSize: 34,
+                          ),
+                          onPressed: () async {
+                            await playback.togglePlayback();
+                          },
+                          icon: Icon(
+                            playback.isPlaying
+                                ? Icons.pause_rounded
+                                : Icons.play_arrow_rounded,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        IconButton.filledTonal(
+                          onPressed: playback.canSkipNext
+                              ? () async {
+                                  await playback.skipNext();
+                                }
+                              : null,
+                          icon: const Icon(Icons.skip_next_rounded),
+                        ),
+                      ],
+                    ),
+                    const Spacer(),
+                  ],
+                ),
+              ),
+            ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerLow,
+                border: Border(
+                  top: BorderSide(color: Theme.of(context).dividerColor),
+                ),
+              ),
+              child: SizedBox(
+                height: 220,
+                child: ListView.separated(
+                  itemCount: playback.queue.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final item = playback.queue[index];
+                    final selected = index == playback.currentIndex;
+                    return ListTile(
+                      leading: CircleAvatar(
+                        child: Icon(
+                          item.attachment.isVoice
+                              ? Icons.mic_rounded
+                              : Icons.music_note_rounded,
+                        ),
+                      ),
+                      title: Text(
+                        item.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        item.subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: Text(
+                        _formatDuration(
+                          item.attachment.durationSeconds == null
+                              ? Duration.zero
+                              : Duration(
+                                  seconds: item.attachment.durationSeconds!,
+                                ),
+                        ),
+                      ),
+                      selected: selected,
+                      onTap: () async {
+                        await playback.setQueue(
+                          playback.queue,
+                          initialIndex: index,
+                          autoPlay: true,
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

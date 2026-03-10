@@ -41,12 +41,15 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
   double? _downloadProgress;
   ReleaseInfo? _latest;
   UserSettingsBundle? _settings;
-  String? _downloadedUpdatePath;
+  CachedAttachmentStats _cacheStats = CachedAttachmentStats.empty;
+  bool _loadingCacheStats = false;
+  DownloadedUpdatePackage? _downloadedUpdate;
 
   @override
   void initState() {
     super.initState();
     _loadSettings();
+    _refreshCacheStats();
   }
 
   Future<void> _loadSettings() async {
@@ -123,13 +126,14 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
     setState(() {
       _downloadingUpdate = true;
       _downloadProgress = 0;
-      _downloadedUpdatePath = null;
+      _downloadedUpdate = null;
     });
 
     try {
-      final path = await downloadUpdatePackage(
+      final package = await downloadUpdatePackage(
         downloadUrl: downloadUrl,
         fileName: fileName,
+        expectedSha256: release.sha256,
         onProgress: (progress) {
           if (!mounted) return;
           setState(() => _downloadProgress = progress);
@@ -138,9 +142,13 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
       if (!mounted) return;
       setState(() {
         _downloadProgress = 1;
-        _downloadedUpdatePath = path;
+        _downloadedUpdate = package;
       });
-      _showSnack('Update downloaded inside the app');
+      _showSnack(
+        release.sha256?.trim().isNotEmpty == true
+            ? 'Update downloaded and verified'
+            : 'Update downloaded inside the app',
+      );
     } catch (error) {
       _showSnack(error.toString());
     } finally {
@@ -151,7 +159,7 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
   }
 
   Future<void> _installDownloadedUpdate() async {
-    final path = _downloadedUpdatePath;
+    final path = _downloadedUpdate?.path;
     if (path == null || path.isEmpty) return;
     final result = await OpenFile.open(path);
     if (result.type != ResultType.done && mounted) {
@@ -229,10 +237,212 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
     }
   }
 
+  Future<void> _refreshCacheStats() async {
+    if (_loadingCacheStats) return;
+    if (mounted) {
+      setState(() => _loadingCacheStats = true);
+    }
+    try {
+      final stats = await AstraAttachmentCache.instance.stats();
+      if (!mounted) return;
+      setState(() => _cacheStats = stats);
+    } catch (error) {
+      _showSnack(error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => _loadingCacheStats = false);
+      }
+    }
+  }
+
   Future<void> _clearAttachmentCache() async {
     try {
       await AstraAttachmentCache.instance.clear();
+      await _refreshCacheStats();
       _showSnack('Downloaded media cache cleared');
+    } catch (error) {
+      _showSnack(error.toString());
+    }
+  }
+
+  Future<void> _applyKeepMediaRuleNow() async {
+    final keepDays = _settings?.dataStorage.keepMediaDays;
+    if (keepDays == null) return;
+    try {
+      await AstraAttachmentCache.instance.pruneOlderThan(
+        Duration(days: keepDays),
+      );
+      await _refreshCacheStats();
+      _showSnack('Applied keep media rule to downloaded files');
+    } catch (error) {
+      _showSnack(error.toString());
+    }
+  }
+
+  Future<void> _openCachedFile(CachedAttachmentEntry entry) async {
+    final result = await OpenFile.open(entry.filePath);
+    if (result.type != ResultType.done && mounted) {
+      _showSnack('Could not open downloaded file');
+    }
+  }
+
+  Future<void> _showDownloadedMediaManager() async {
+    try {
+      final rows = await AstraAttachmentCache.instance.listEntries();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (context) {
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.all(context.sp(12)),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Downloaded media',
+                    style: TextStyle(
+                      fontSize: context.sp(18),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(6)),
+                  Text(
+                    '${rows.length} item(s) - ${_formatStorageBytes(rows.fold<int>(0, (sum, item) => sum + item.sizeBytes))}',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(10)),
+                  if (rows.isEmpty)
+                    Padding(
+                      padding: EdgeInsets.all(context.sp(20)),
+                      child: const Text('No downloaded files yet'),
+                    )
+                  else
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: rows.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final entry = rows[index];
+                          return ListTile(
+                            leading: const Icon(Icons.download_done_rounded),
+                            title: Text(
+                              entry.fileName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              '${entry.chatTitle ?? 'Downloads'} - ${_formatStorageBytes(entry.sizeBytes)} - ${_formatStorageMoment(entry.lastAccessedAt)}',
+                            ),
+                            trailing: IconButton(
+                              tooltip: 'Delete',
+                              onPressed: () async {
+                                await AstraAttachmentCache.instance.deleteEntry(
+                                  entry.url,
+                                );
+                                if (context.mounted) {
+                                  Navigator.of(context).pop();
+                                }
+                                await _refreshCacheStats();
+                                await _showDownloadedMediaManager();
+                              },
+                              icon: const Icon(Icons.delete_outline_rounded),
+                            ),
+                            onTap: () => _openCachedFile(entry),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    } catch (error) {
+      _showSnack(error.toString());
+    }
+  }
+
+  Future<void> _showDownloadsByChatsManager() async {
+    try {
+      final buckets = await AstraAttachmentCache.instance.statsByChats();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (context) {
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.all(context.sp(12)),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Storage by chats',
+                    style: TextStyle(
+                      fontSize: context.sp(18),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(6)),
+                  Text(
+                    '${buckets.length} chats',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  SizedBox(height: context.sp(10)),
+                  if (buckets.isEmpty)
+                    Padding(
+                      padding: EdgeInsets.all(context.sp(20)),
+                      child: const Text('No chat downloads yet'),
+                    )
+                  else
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: buckets.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final bucket = buckets[index];
+                          return ListTile(
+                            leading: const Icon(Icons.forum_outlined),
+                            title: Text(bucket.chatTitle),
+                            subtitle: Text(
+                              '${bucket.totalItems} item(s) - ${_formatStorageBytes(bucket.totalBytes)}',
+                            ),
+                            trailing: bucket.chatId == null
+                                ? null
+                                : IconButton(
+                                    tooltip: 'Clear chat files',
+                                    onPressed: () async {
+                                      await AstraAttachmentCache.instance
+                                          .clearByChat(bucket.chatId!);
+                                      if (context.mounted) {
+                                        Navigator.of(context).pop();
+                                      }
+                                      await _refreshCacheStats();
+                                      await _showDownloadsByChatsManager();
+                                    },
+                                    icon: const Icon(
+                                      Icons.delete_sweep_outlined,
+                                    ),
+                                  ),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
     } catch (error) {
       _showSnack(error.toString());
     }
@@ -537,9 +747,14 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
           _DataStorageSettingsCard(
             settings: _settings,
             loading: _loadingSettings,
+            cacheStats: _cacheStats,
+            loadingCacheStats: _loadingCacheStats,
             onReload: _loadSettings,
             onDataChanged: _updateDataStorage,
             onClearCache: _clearAttachmentCache,
+            onManageDownloads: _showDownloadedMediaManager,
+            onManageDownloadsByChats: _showDownloadsByChatsManager,
+            onApplyKeepRuleNow: _applyKeepMediaRuleNow,
           ),
           SizedBox(height: context.sp(10)),
           Card(
@@ -617,8 +832,10 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
                       Text(
                         _downloadingUpdate
                             ? 'Downloading ${(100 * (_downloadProgress ?? 0)).round()}%'
-                            : _downloadedUpdatePath != null
-                            ? 'Downloaded package is ready'
+                            : _downloadedUpdate != null
+                            ? _downloadedUpdate!.sha256.isNotEmpty
+                                  ? 'Downloaded package is verified'
+                                  : 'Downloaded package is ready'
                             : 'Download progress is unavailable',
                       ),
                     ],
@@ -640,23 +857,37 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
                           ),
                         ),
                         OutlinedButton(
-                          onPressed: _downloadedUpdatePath == null
+                          onPressed: _downloadedUpdate == null
                               ? null
                               : _installDownloadedUpdate,
                           child: const Text('Install downloaded update'),
                         ),
                       ],
                     ),
-                    if (_downloadedUpdatePath != null)
+                    if (_downloadedUpdate != null)
                       Padding(
                         padding: EdgeInsets.only(top: context.sp(8)),
-                        child: Text(
-                          'Installer: $_downloadedUpdatePath',
-                          style: TextStyle(
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.onSurfaceVariant,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Installer: ${_downloadedUpdate!.path}',
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            SizedBox(height: context.sp(4)),
+                            Text(
+                              'SHA-256: ${_downloadedUpdate!.sha256}',
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                   ],
@@ -794,6 +1025,8 @@ class _PrivacySettingsCard extends StatelessWidget {
 class _DataStorageSettingsCard extends StatelessWidget {
   final UserSettingsBundle? settings;
   final bool loading;
+  final CachedAttachmentStats cacheStats;
+  final bool loadingCacheStats;
   final Future<void> Function() onReload;
   final Future<void> Function({
     int? keepMediaDays,
@@ -806,18 +1039,32 @@ class _DataStorageSettingsCard extends StatelessWidget {
   })
   onDataChanged;
   final Future<void> Function() onClearCache;
+  final Future<void> Function() onManageDownloads;
+  final Future<void> Function() onManageDownloadsByChats;
+  final Future<void> Function() onApplyKeepRuleNow;
 
   const _DataStorageSettingsCard({
     required this.settings,
     required this.loading,
+    required this.cacheStats,
+    required this.loadingCacheStats,
     required this.onReload,
     required this.onDataChanged,
     required this.onClearCache,
+    required this.onManageDownloads,
+    required this.onManageDownloadsByChats,
+    required this.onApplyKeepRuleNow,
   });
 
   @override
   Widget build(BuildContext context) {
     final bundle = settings;
+    final limitBytes = bundle == null
+        ? 0
+        : bundle.dataStorage.storageLimitMb * 1024 * 1024;
+    final usageFraction = limitBytes <= 0
+        ? 0.0
+        : (cacheStats.totalBytes / limitBytes).clamp(0.0, 1.0);
     return Card(
       child: Padding(
         padding: EdgeInsets.all(context.sp(14)),
@@ -833,7 +1080,7 @@ class _DataStorageSettingsCard extends StatelessWidget {
             ),
             SizedBox(height: context.sp(6)),
             Text(
-              'Auto-download, media retention, default auto-delete timer, and local cache cleanup.',
+              'Auto-download, media retention, local storage usage, and download cleanup.',
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
@@ -847,6 +1094,92 @@ class _DataStorageSettingsCard extends StatelessWidget {
                 child: const Text('Load settings'),
               )
             else ...[
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.all(context.sp(12)),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(context.sp(16)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'Downloaded media',
+                          style: TextStyle(
+                            fontSize: context.sp(14),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (loadingCacheStats)
+                          SizedBox(
+                            width: context.sp(16),
+                            height: context.sp(16),
+                            child: const CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        else
+                          Text(
+                            _formatStorageBytes(cacheStats.totalBytes),
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                      ],
+                    ),
+                    SizedBox(height: context.sp(10)),
+                    Wrap(
+                      spacing: context.sp(8),
+                      runSpacing: context.sp(8),
+                      children: [
+                        _StorageSummaryChip(
+                          icon: Icons.photo_library_outlined,
+                          label: '${cacheStats.photoItems} photos',
+                        ),
+                        _StorageSummaryChip(
+                          icon: Icons.smart_display_outlined,
+                          label: '${cacheStats.videoItems} videos',
+                        ),
+                        _StorageSummaryChip(
+                          icon: Icons.headphones_rounded,
+                          label: '${cacheStats.audioItems} audio',
+                        ),
+                        _StorageSummaryChip(
+                          icon: Icons.insert_drive_file_outlined,
+                          label: '${cacheStats.fileItems} files',
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: context.sp(12)),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Using ${_formatStorageBytes(cacheStats.totalBytes)} of ${_formatStorageBytes(limitBytes)}',
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        Text('${(usageFraction * 100).round()}%'),
+                      ],
+                    ),
+                    SizedBox(height: context.sp(6)),
+                    LinearProgressIndicator(value: usageFraction),
+                  ],
+                ),
+              ),
+              SizedBox(height: context.sp(10)),
               DropdownButtonFormField<int>(
                 initialValue: bundle.dataStorage.keepMediaDays,
                 decoration: const InputDecoration(labelText: 'Keep media for'),
@@ -859,6 +1192,23 @@ class _DataStorageSettingsCard extends StatelessWidget {
                 onChanged: (value) {
                   if (value != null) {
                     onDataChanged(keepMediaDays: value);
+                  }
+                },
+              ),
+              SizedBox(height: context.sp(10)),
+              DropdownButtonFormField<int>(
+                initialValue: bundle.dataStorage.storageLimitMb,
+                decoration: const InputDecoration(labelText: 'Storage limit'),
+                items: const [
+                  DropdownMenuItem(value: 512, child: Text('512 MB')),
+                  DropdownMenuItem(value: 1024, child: Text('1 GB')),
+                  DropdownMenuItem(value: 2048, child: Text('2 GB')),
+                  DropdownMenuItem(value: 4096, child: Text('4 GB')),
+                  DropdownMenuItem(value: 8192, child: Text('8 GB')),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    onDataChanged(storageLimitMb: value);
                   }
                 },
               ),
@@ -908,10 +1258,44 @@ class _DataStorageSettingsCard extends StatelessWidget {
                 onChanged: (value) => onDataChanged(autoDownloadFiles: value),
               ),
               SizedBox(height: context.sp(8)),
-              OutlinedButton.icon(
-                onPressed: onClearCache,
-                icon: const Icon(Icons.delete_sweep_outlined),
-                label: const Text('Clear downloaded media cache'),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: onManageDownloads,
+                      icon: const Icon(Icons.folder_open_rounded),
+                      label: const Text('Manage downloads'),
+                    ),
+                  ),
+                  SizedBox(width: context.sp(8)),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: onManageDownloadsByChats,
+                      icon: const Icon(Icons.forum_outlined),
+                      label: const Text('Storage by chats'),
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(height: context.sp(8)),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: onApplyKeepRuleNow,
+                      icon: const Icon(Icons.auto_delete_outlined),
+                      label: const Text('Apply keep rule'),
+                    ),
+                  ),
+                  SizedBox(width: context.sp(8)),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: onClearCache,
+                      icon: const Icon(Icons.delete_sweep_outlined),
+                      label: const Text('Clear cache'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ],
@@ -919,6 +1303,50 @@ class _DataStorageSettingsCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _StorageSummaryChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+
+  const _StorageSummaryChip({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Chip(
+      avatar: Icon(icon, size: context.sp(16)),
+      label: Text(label),
+    );
+  }
+}
+
+String _formatStorageBytes(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  if (bytes >= 1024) {
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+  return '$bytes B';
+}
+
+String _formatStorageMoment(DateTime value) {
+  final local = value.toLocal();
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final date = DateTime(local.year, local.month, local.day);
+  final time =
+      '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+  if (date == today) {
+    return 'Today $time';
+  }
+  if (date == today.subtract(const Duration(days: 1))) {
+    return 'Yesterday $time';
+  }
+  return '${local.day.toString().padLeft(2, '0')}.${local.month.toString().padLeft(2, '0')}.${local.year} $time';
 }
 
 class _AudienceSelector extends StatelessWidget {

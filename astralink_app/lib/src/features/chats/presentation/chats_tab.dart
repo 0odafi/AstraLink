@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
@@ -22,6 +21,7 @@ import '../../../core/ui/adaptive_size.dart';
 import '../../../core/ui/app_appearance.dart';
 import '../../../models.dart';
 import '../../../realtime.dart';
+import '../../audio/application/chat_audio_playback_controller.dart';
 import '../../settings/application/app_preferences.dart';
 import '../application/chat_view_models.dart';
 import '../data/chat_drafts_local_cache.dart';
@@ -2015,6 +2015,49 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     await _uploadAttachment(item.localId);
   }
 
+  List<ChatAudioQueueItem> _buildAudioQueue() {
+    final queue = <ChatAudioQueueItem>[];
+    for (final message in _messages) {
+      final timeLabel =
+          '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}';
+      final senderLabel = message.senderId == widget.me.id
+          ? 'You'
+          : widget.chat.title;
+      for (final attachment in message.attachments.where(
+        (item) => item.isAudio,
+      )) {
+        queue.add(
+          ChatAudioQueueItem(
+            attachment: attachment,
+            audioUrl: widget.api.resolveUrl(attachment.url),
+            title: attachment.displayLabel,
+            subtitle: '$senderLabel - $timeLabel',
+          ),
+        );
+      }
+    }
+    return queue;
+  }
+
+  Future<void> _openAudioViewer(MessageAttachmentItem attachment) async {
+    final queue = _buildAudioQueue();
+    if (queue.isEmpty) {
+      _showSnack('No audio attachments available');
+      return;
+    }
+    final initialIndex = queue.indexWhere(
+      (item) => item.attachment.id == attachment.id,
+    );
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => ChatAudioPlayerPage(
+          queue: queue,
+          initialIndex: initialIndex < 0 ? 0 : initialIndex,
+        ),
+      ),
+    );
+  }
+
   Future<void> _openAttachment(MessageAttachmentItem attachment) async {
     if (attachment.isImage) {
       await _openImageViewer(attachment);
@@ -2022,6 +2065,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
     if (attachment.isVideo) {
       await _openVideoViewer(attachment);
+      return;
+    }
+    if (attachment.isAudio) {
+      await _openAudioViewer(attachment);
       return;
     }
 
@@ -2052,6 +2099,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       File? downloadedFile;
       await for (final event in AstraAttachmentCache.instance.download(
         resolvedUrl,
+        mediaClass: attachment.mediaKind,
+        fileName: attachment.fileName,
+        chatId: widget.chat.id,
+        chatTitle: widget.chat.title,
+        attachmentId: attachment.id,
       )) {
         if (!mounted) break;
         if (event.file != null) {
@@ -3259,7 +3311,7 @@ class _MessageBubble extends StatelessWidget {
                           padding: EdgeInsets.only(bottom: context.sp(6)),
                           child: InkWell(
                             borderRadius: BorderRadius.circular(context.sp(12)),
-                            onTap: onAttachmentTap == null || attachment.isAudio
+                            onTap: onAttachmentTap == null
                                 ? null
                                 : () => onAttachmentTap!(attachment),
                             child: Stack(
@@ -3420,7 +3472,7 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-class _AudioAttachmentTile extends StatefulWidget {
+class _AudioAttachmentTile extends ConsumerWidget {
   final MessageAttachmentItem attachment;
   final String url;
   final AppAppearanceData appearance;
@@ -3431,91 +3483,47 @@ class _AudioAttachmentTile extends StatefulWidget {
     required this.appearance,
   });
 
-  @override
-  State<_AudioAttachmentTile> createState() => _AudioAttachmentTileState();
-}
-
-class _AudioAttachmentTileState extends State<_AudioAttachmentTile> {
-  late final AudioPlayer _player;
-  StreamSubscription<PlayerState>? _playerStateSubscription;
-  StreamSubscription<Duration>? _positionSubscription;
-  StreamSubscription<Duration>? _durationSubscription;
-  StreamSubscription<void>? _playerCompleteSubscription;
-  PlayerState _playerState = PlayerState.stopped;
-  Duration _position = Duration.zero;
-  Duration _duration = Duration.zero;
-
-  @override
-  void initState() {
-    super.initState();
-    _player = AudioPlayer();
-    _playerStateSubscription = _player.onPlayerStateChanged.listen((state) {
-      if (!mounted) return;
-      setState(() => _playerState = state);
-    });
-    _positionSubscription = _player.onPositionChanged.listen((position) {
-      if (!mounted) return;
-      setState(() => _position = position);
-    });
-    _durationSubscription = _player.onDurationChanged.listen((duration) {
-      if (!mounted) return;
-      setState(() => _duration = duration);
-    });
-    _playerCompleteSubscription = _player.onPlayerComplete.listen((_) {
-      if (!mounted) return;
-      setState(() {
-        _playerState = PlayerState.completed;
-        _position = _duration;
-      });
-    });
-  }
-
-  @override
-  void dispose() {
-    _playerStateSubscription?.cancel();
-    _positionSubscription?.cancel();
-    _durationSubscription?.cancel();
-    _playerCompleteSubscription?.cancel();
-    unawaited(_player.dispose());
-    super.dispose();
-  }
-
-  Future<void> _togglePlayback() async {
-    try {
-      if (_playerState == PlayerState.playing) {
-        await _player.pause();
-        return;
-      }
-      if (_playerState == PlayerState.paused) {
-        await _player.resume();
-        return;
-      }
-      if (_playerState == PlayerState.completed) {
-        await _player.seek(Duration.zero);
-      }
-      await _player.play(UrlSource(widget.url));
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not play audio attachment')),
-      );
+  Future<void> _togglePlayback(WidgetRef ref) async {
+    final playback = ref.read(chatAudioPlaybackProvider);
+    if (playback.isCurrentAttachment(attachment.id)) {
+      await playback.togglePlayback();
+      return;
     }
+    await playback.playSingle(
+      ChatAudioQueueItem(
+        attachment: attachment,
+        audioUrl: url,
+        title: attachment.displayLabel,
+        subtitle: attachment.isVoice ? 'Voice message' : 'Audio attachment',
+      ),
+    );
   }
 
   @override
-  Widget build(BuildContext context) {
-    final active = _playerState == PlayerState.playing;
-    final total = _duration.inMilliseconds <= 0
+  Widget build(BuildContext context, WidgetRef ref) {
+    final playback = ref.watch(chatAudioPlaybackProvider);
+    final isCurrent = playback.isCurrentAttachment(attachment.id);
+    final active = playback.isPlayingAttachment(attachment.id);
+    final position = isCurrent ? playback.position : Duration.zero;
+    final duration = isCurrent
+        ? playback.effectiveDuration
+        : attachment.durationSeconds == null
+        ? Duration.zero
+        : Duration(seconds: attachment.durationSeconds!);
+    final total = duration.inMilliseconds <= 0
         ? 1.0
-        : _duration.inMilliseconds.toDouble();
-    final progress = (_position.inMilliseconds / total).clamp(0.0, 1.0);
-    final shownDuration = _duration.inMilliseconds > 0 ? _duration : _position;
+        : duration.inMilliseconds.toDouble();
+    final progress = isCurrent
+        ? (position.inMilliseconds / total).clamp(0.0, 1.0)
+        : 0.0;
 
     return Row(
       children: [
         IconButton.filledTonal(
           tooltip: active ? 'Pause' : 'Play',
-          onPressed: _togglePlayback,
+          onPressed: () async {
+            await _togglePlayback(ref);
+          },
           icon: Icon(active ? Icons.pause_rounded : Icons.play_arrow_rounded),
         ),
         SizedBox(width: context.sp(8)),
@@ -3525,11 +3533,11 @@ class _AudioAttachmentTileState extends State<_AudioAttachmentTile> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                widget.attachment.displayLabel,
+                attachment.displayLabel,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: context.sp(13) * widget.appearance.messageTextScale,
+                  fontSize: context.sp(13) * appearance.messageTextScale,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -3544,9 +3552,9 @@ class _AudioAttachmentTileState extends State<_AudioAttachmentTile> {
               ),
               SizedBox(height: context.sp(4)),
               Text(
-                '${_formatClockDuration(_position)} / ${_formatClockDuration(shownDuration)}',
+                '${_formatClockDuration(position)} / ${_formatClockDuration(duration)}',
                 style: TextStyle(
-                  fontSize: context.sp(11) * widget.appearance.messageTextScale,
+                  fontSize: context.sp(11) * appearance.messageTextScale,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),

@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api.dart';
 import '../../../models.dart';
+import '../../audio/presentation/audio_mini_player.dart';
 import '../../chats/presentation/chats_tab.dart';
+import '../../chats/presentation/media_viewers.dart';
 import '../../contacts/presentation/contacts_tab.dart';
 import '../../profile/presentation/profile_tab.dart';
 import '../../settings/presentation/settings_tab.dart';
 
-class HomeShell extends StatefulWidget {
+class HomeShell extends ConsumerStatefulWidget {
   final AstraApi api;
   final AuthTokens? Function() getTokens;
   final AppUser user;
@@ -30,10 +33,10 @@ class HomeShell extends StatefulWidget {
   });
 
   @override
-  State<HomeShell> createState() => _HomeShellState();
+  ConsumerState<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends ConsumerState<HomeShell> {
   int _index = 0;
 
   @override
@@ -66,29 +69,42 @@ class _HomeShellState extends State<HomeShell> {
         duration: const Duration(milliseconds: 200),
         child: KeyedSubtree(key: ValueKey(_index), child: pages[_index]),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: (value) => setState(() => _index = value),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.chat_bubble_outline),
-            label: 'Chats',
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AudioMiniPlayerBar(
+            onOpenFullPlayer: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const ChatAudioPlayerPage(),
+                ),
+              );
+            },
           ),
-          NavigationDestination(
-            icon: Icon(Icons.person_search_outlined),
-            label: 'Contacts',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            label: 'Settings',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.account_circle_outlined),
-            label: 'Profile',
+          NavigationBar(
+            selectedIndex: _index,
+            onDestinationSelected: (value) => setState(() => _index = value),
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.chat_bubble_outline),
+                label: 'Chats',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.person_search_outlined),
+                label: 'Contacts',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.settings_outlined),
+                label: 'Settings',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.account_circle_outlined),
+                label: 'Profile',
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 }
-
