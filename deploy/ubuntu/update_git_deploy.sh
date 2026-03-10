@@ -15,6 +15,14 @@ git_safe() {
   git -c safe.directory="${APP_DIR}" -C "${APP_DIR}" "$@"
 }
 
+create_history_backup_ref() {
+  local timestamp backup_ref
+  timestamp="$(date +%Y%m%d%H%M%S)"
+  backup_ref="refs/heads/deploy-backup-${timestamp}"
+  git_safe update-ref "${backup_ref}" HEAD
+  printf '%s\n' "${backup_ref}"
+}
+
 detect_source_dir() {
   if [[ -f "${APP_DIR}/pyproject.toml" ]]; then
     printf '%s\n' "${APP_DIR}"
@@ -49,9 +57,15 @@ if [[ ! -d "${APP_DIR}/.git" ]]; then
   exit 1
 fi
 
-git_safe fetch origin
+git_safe fetch --tags origin
 git_safe checkout "${BRANCH}"
-git_safe pull --ff-only origin "${BRANCH}"
+
+remote_ref="origin/${BRANCH}"
+if [[ "$(git_safe rev-parse HEAD)" != "$(git_safe rev-parse "${remote_ref}")" ]]; then
+  BACKUP_REF="$(create_history_backup_ref)"
+  echo "Created backup ref: ${BACKUP_REF}"
+fi
+git_safe reset --hard "${remote_ref}"
 
 SOURCE_DIR="$(detect_source_dir)"
 ensure_compat_links "${SOURCE_DIR}"
