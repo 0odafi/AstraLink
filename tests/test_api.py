@@ -1,8 +1,11 @@
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote_plus
 
 from sqlalchemy import inspect
 
+from app.core.database import SessionLocal
 from app.core.database import engine
+from app.services.scheduled_service import dispatch_due_scheduled_messages
 
 TEST_AUTH_CODE = "12345"
 
@@ -613,3 +616,128 @@ def test_blocking_prevents_private_chat_open_and_message_send(client):
     remove_block = client.delete(f"/api/users/blocks/{bob['user']['id']}", headers=alice_headers)
     assert remove_block.status_code == 200, remove_block.text
     assert remove_block.json() == {'removed': True}
+
+
+def test_scheduled_messages_create_list_and_cancel(client):
+    alice = _auth_by_phone(client, '+7 900 901 22 33', 'Alice', 'Schedule')
+    bob = _auth_by_phone(client, '+7 900 901 22 44', 'Bob', 'Schedule')
+
+    alice_headers = _auth_headers(alice['access_token'])
+    bob_headers = _auth_headers(bob['access_token'])
+
+    client.patch(
+        '/api/users/me',
+        headers=alice_headers,
+        json={'first_name': 'Alice', 'last_name': 'Schedule'},
+    )
+    client.patch(
+        '/api/users/me',
+        headers=bob_headers,
+        json={'first_name': 'Bob', 'last_name': 'Schedule', 'username': 'bob_schedule'},
+    )
+
+    open_chat = client.post('/api/chats/private?query=bob_schedule', headers=alice_headers)
+    assert open_chat.status_code == 200, open_chat.text
+    chat_id = open_chat.json()['id']
+
+    send_at = (datetime.now(UTC) + timedelta(minutes=15)).isoformat()
+    scheduled = client.post(
+        f'/api/chats/{chat_id}/scheduled-messages',
+        headers=alice_headers,
+        json={
+            'content': 'Ping later',
+            'mode': 'at_time',
+            'send_at': send_at,
+        },
+    )
+    assert scheduled.status_code == 201, scheduled.text
+    payload = scheduled.json()
+    assert payload['chat_id'] == chat_id
+    assert payload['status'] == 'pending'
+    assert payload['mode'] == 'at_time'
+    assert payload['content'] == 'Ping later'
+
+    listed = client.get(f'/api/chats/{chat_id}/scheduled-messages', headers=alice_headers)
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]['id'] == payload['id']
+
+    canceled = client.delete(
+        f"/api/chats/{chat_id}/scheduled-messages/{payload['id']}",
+        headers=alice_headers,
+    )
+    assert canceled.status_code == 200, canceled.text
+    assert canceled.json()['removed'] is True
+
+    listed_after = client.get(f'/api/chats/{chat_id}/scheduled-messages', headers=alice_headers)
+    assert listed_after.status_code == 200, listed_after.text
+    assert listed_after.json() == []
+
+    listed_all = client.get(
+        f'/api/chats/{chat_id}/scheduled-messages?include_dispatched=true',
+        headers=alice_headers,
+    )
+    assert listed_all.status_code == 200, listed_all.text
+    assert listed_all.json()[0]['status'] == 'canceled'
+
+
+def test_send_when_online_dispatches_as_normal_message(client):
+    alice = _auth_by_phone(client, '+7 900 902 22 33', 'Alice', 'Online')
+    bob = _auth_by_phone(client, '+7 900 902 22 44', 'Bob', 'Online')
+
+    alice_headers = _auth_headers(alice['access_token'])
+    bob_headers = _auth_headers(bob['access_token'])
+
+    client.patch(
+        '/api/users/me',
+        headers=alice_headers,
+        json={'first_name': 'Alice', 'last_name': 'Online'},
+    )
+    client.patch(
+        '/api/users/me',
+        headers=bob_headers,
+        json={'first_name': 'Bob', 'last_name': 'Online', 'username': 'bob_online'},
+    )
+
+    open_chat = client.post('/api/chats/private?query=bob_online', headers=alice_headers)
+    assert open_chat.status_code == 200, open_chat.text
+    chat_id = open_chat.json()['id']
+
+    scheduled = client.post(
+        f'/api/chats/{chat_id}/scheduled-messages',
+        headers=alice_headers,
+        json={
+            'content': 'Deliver when you are online',
+            'mode': 'when_online',
+        },
+    )
+    assert scheduled.status_code == 201, scheduled.text
+    scheduled_payload = scheduled.json()
+    assert scheduled_payload['status'] == 'pending'
+    assert scheduled_payload['mode'] == 'when_online'
+
+    with client.websocket_connect(f"/api/realtime/me/ws?token={bob['access_token']}") as bob_ws:
+        assert bob_ws.receive_json()['type'] == 'ready'
+
+        db = SessionLocal()
+        try:
+            dispatched = dispatch_due_scheduled_messages(db, limit=10)
+        finally:
+            db.close()
+
+    assert len(dispatched) == 1
+    assert dispatched[0].scheduled_message_id == scheduled_payload['id']
+    assert dispatched[0].serialized_message['content'] == 'Deliver when you are online'
+
+    history = client.get(f'/api/chats/{chat_id}/messages', headers=bob_headers)
+    assert history.status_code == 200, history.text
+    assert any(item['content'] == 'Deliver when you are online' for item in history.json())
+
+    listed = client.get(
+        f'/api/chats/{chat_id}/scheduled-messages?include_dispatched=true',
+        headers=alice_headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]['status'] == 'dispatched'
+    assert listed.json()[0]['dispatched_message_id'] is not None

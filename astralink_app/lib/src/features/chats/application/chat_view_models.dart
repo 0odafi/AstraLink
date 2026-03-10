@@ -219,6 +219,8 @@ class ChatThreadViewModel extends ChangeNotifier {
   bool loadingMore = false;
   bool sending = false;
   List<MessageItem> messages = const [];
+  bool scheduledLoading = false;
+  List<ScheduledMessageItem> scheduledMessages = const [];
   int? nextBeforeId;
   Timer? _persistDebounce;
 
@@ -237,6 +239,7 @@ class ChatThreadViewModel extends ChangeNotifier {
   Future<void> prime() async {
     await _loadCachedMessages();
     await loadMessages();
+    await loadScheduledMessages(silent: true);
   }
 
   Future<void> _loadCachedMessages() async {
@@ -265,7 +268,8 @@ class ChatThreadViewModel extends ChangeNotifier {
         chatId: _chatId,
         limit: 60,
       );
-      final rows = [...page.items]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      final rows = [...page.items]
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       messages = rows;
       nextBeforeId = page.nextBeforeId;
       _schedulePersistMessages();
@@ -343,6 +347,91 @@ class ChatThreadViewModel extends ChangeNotifier {
     } finally {
       sending = false;
       notifyListeners();
+    }
+  }
+
+  Future<String?> loadScheduledMessages({bool silent = false}) async {
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+    if (!silent) {
+      scheduledLoading = true;
+      notifyListeners();
+    }
+    try {
+      final rows = await _api.listScheduledMessages(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: _chatId,
+      );
+      scheduledMessages = rows;
+      return null;
+    } catch (error) {
+      return error.toString();
+    } finally {
+      scheduledLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<String?> scheduleMessage({
+    required String text,
+    required String mode,
+    DateTime? sendAt,
+    int? replyToMessageId,
+    List<int> attachmentIds = const [],
+  }) async {
+    final cleaned = text.trim();
+    if ((cleaned.isEmpty && attachmentIds.isEmpty) || sending) return null;
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+
+    sending = true;
+    notifyListeners();
+    try {
+      final scheduled = await _api.scheduleMessage(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: _chatId,
+        content: cleaned,
+        mode: mode,
+        sendAt: sendAt,
+        replyToMessageId: replyToMessageId,
+        attachmentIds: attachmentIds,
+      );
+      scheduledMessages = [...scheduledMessages, scheduled]
+        ..sort((a, b) {
+          final aStamp = a.sendAt ?? a.createdAt;
+          final bStamp = b.sendAt ?? b.createdAt;
+          return aStamp.compareTo(bStamp);
+        });
+      return null;
+    } catch (error) {
+      return error.toString();
+    } finally {
+      sending = false;
+      notifyListeners();
+    }
+  }
+
+  Future<String?> cancelScheduledMessage(int scheduledMessageId) async {
+    final tokens = _getTokens();
+    if (tokens == null) return 'Session expired';
+    try {
+      final removed = await _api.cancelScheduledMessage(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        chatId: _chatId,
+        scheduledMessageId: scheduledMessageId,
+      );
+      if (removed) {
+        scheduledMessages = scheduledMessages
+            .where((item) => item.id != scheduledMessageId)
+            .toList();
+        notifyListeners();
+      }
+      return null;
+    } catch (error) {
+      return error.toString();
     }
   }
 
@@ -471,11 +560,7 @@ class ChatThreadViewModel extends ChangeNotifier {
 
   void updateMessageStatus(int messageId, String status) {
     messages = messages
-        .map(
-          (row) => row.id == messageId
-              ? row.copyWith(status: status)
-              : row,
-        )
+        .map((row) => row.id == messageId ? row.copyWith(status: status) : row)
         .toList();
     _schedulePersistMessages();
     notifyListeners();
@@ -507,6 +592,9 @@ class ChatThreadViewModel extends ChangeNotifier {
     }
     return pinned;
   }
+
+  int get scheduledPendingCount =>
+      scheduledMessages.where((item) => item.status == 'pending').length;
 
   void _schedulePersistMessages() {
     _persistDebounce?.cancel();

@@ -982,6 +982,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 .read(chatThreadViewModelProvider(_threadArgs))
                 .loadMessages(silent: true),
           );
+          unawaited(
+            ref
+                .read(chatThreadViewModelProvider(_threadArgs))
+                .loadScheduledMessages(silent: true),
+          );
         }
       },
     )..start();
@@ -1109,6 +1114,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ref
             .read(chatThreadViewModelProvider(_threadArgs))
             .loadMessages(silent: true),
+      );
+      return;
+    }
+
+    if (type == 'scheduled_message_created' ||
+        type == 'scheduled_message_canceled' ||
+        type == 'scheduled_message_dispatched') {
+      final chatId = map['chat_id'];
+      if (chatId is! int || chatId != widget.chat.id) return;
+      unawaited(
+        ref
+            .read(chatThreadViewModelProvider(_threadArgs))
+            .loadScheduledMessages(silent: true),
       );
     }
   }
@@ -1301,20 +1319,307 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             attachmentIds: _readyAttachmentIds,
           );
     if (error == null) {
-      _messageController.clear();
-      _notifyTypingStopped();
-      await _clearDraft();
-      _clearComposerMode();
-      if (mounted) {
-        setState(() {
-          _pendingAttachments = const <_PendingComposerAttachment>[];
-        });
-      }
+      await _clearComposerAfterSubmit();
       _scrollToBottom();
       if (mounted) setState(() {});
       return;
     }
     _showSnack(error);
+  }
+
+  Future<void> _clearComposerAfterSubmit() async {
+    _messageController.clear();
+    _notifyTypingStopped();
+    await _clearDraft();
+    _clearComposerMode();
+    if (!mounted) return;
+    setState(() {
+      _pendingAttachments = const <_PendingComposerAttachment>[];
+    });
+  }
+
+  Future<void> _showScheduleOptions() async {
+    if (!_canSend || _editingMessageId != null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.schedule_send_outlined),
+                title: const Text('Send later'),
+                subtitle: const Text('Choose date and time'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_scheduleAtDateTime());
+                },
+              ),
+              if (widget.chat.type == 'private')
+                ListTile(
+                  leading: const Icon(Icons.wifi_tethering_rounded),
+                  title: const Text('Send when online'),
+                  subtitle: const Text(
+                    'Deliver when the other user becomes active',
+                  ),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    unawaited(_scheduleWhenOnline());
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _scheduleAtDateTime() async {
+    final now = DateTime.now();
+    final initial = now.add(const Duration(minutes: 5));
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (pickedDate == null || !mounted) return;
+
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+    );
+    if (pickedTime == null || !mounted) return;
+
+    final scheduledAt = DateTime(
+      pickedDate.year,
+      pickedDate.month,
+      pickedDate.day,
+      pickedTime.hour,
+      pickedTime.minute,
+    );
+    if (!scheduledAt.isAfter(now)) {
+      _showSnack('Choose a future time for scheduled delivery');
+      return;
+    }
+    await _scheduleMessage(mode: 'at_time', sendAt: scheduledAt);
+  }
+
+  Future<void> _scheduleWhenOnline() async {
+    if (widget.chat.type != 'private') {
+      _showSnack('Send when online is available only in private chats');
+      return;
+    }
+    await _scheduleMessage(mode: 'when_online');
+  }
+
+  Future<void> _scheduleMessage({
+    required String mode,
+    DateTime? sendAt,
+  }) async {
+    final error = await ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .scheduleMessage(
+          text: _messageController.text,
+          mode: mode,
+          sendAt: sendAt,
+          replyToMessageId: _replyToMessageId,
+          attachmentIds: _readyAttachmentIds,
+        );
+    if (error != null) {
+      _showSnack(error);
+      return;
+    }
+    await _clearComposerAfterSubmit();
+    if (!mounted) return;
+    final localizations = MaterialLocalizations.of(context);
+    if (mode == 'when_online') {
+      _showSnack('Message will be sent when the other user is online');
+      return;
+    }
+    final scheduledAt = sendAt ?? DateTime.now();
+    _showSnack(
+      'Scheduled for ${localizations.formatMediumDate(scheduledAt)} '
+      '${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(scheduledAt))}',
+    );
+  }
+
+  Future<void> _showScheduledMessagesSheet() async {
+    unawaited(
+      ref
+          .read(chatThreadViewModelProvider(_threadArgs))
+          .loadScheduledMessages(silent: true),
+    );
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) {
+        return Consumer(
+          builder: (context, ref, _) {
+            final vm = ref.watch(chatThreadViewModelProvider(_threadArgs));
+            final items = vm.scheduledMessages;
+            return SafeArea(
+              child: SizedBox(
+                height: MediaQuery.of(context).size.height * 0.68,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(
+                        context.sp(20),
+                        context.sp(18),
+                        context.sp(20),
+                        context.sp(10),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Scheduled messages',
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                          ),
+                          if (vm.scheduledLoading)
+                            SizedBox(
+                              width: context.sp(18),
+                              height: context.sp(18),
+                              child: const CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: items.isEmpty
+                          ? Center(
+                              child: Text(
+                                'No scheduled messages yet',
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            )
+                          : ListView.separated(
+                              padding: EdgeInsets.fromLTRB(
+                                context.sp(12),
+                                0,
+                                context.sp(12),
+                                context.sp(12),
+                              ),
+                              itemCount: items.length,
+                              separatorBuilder: (context, index) =>
+                                  SizedBox(height: context.sp(6)),
+                              itemBuilder: (context, index) {
+                                final item = items[index];
+                                final preview = item.content.trim().isNotEmpty
+                                    ? item.content.trim()
+                                    : item.attachments.isEmpty
+                                    ? 'Scheduled message'
+                                    : 'Media message (${item.attachments.length})';
+                                return ListTile(
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      context.sp(16),
+                                    ),
+                                  ),
+                                  tileColor: Theme.of(
+                                    context,
+                                  ).colorScheme.surfaceContainerHigh,
+                                  leading: Icon(
+                                    item.isWhenOnline
+                                        ? Icons.wifi_tethering_rounded
+                                        : Icons.schedule_send_outlined,
+                                  ),
+                                  title: Text(
+                                    preview,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    _formatScheduledLabel(item),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  trailing: IconButton(
+                                    tooltip: 'Cancel',
+                                    onPressed: item.isPending
+                                        ? () => unawaited(
+                                            _confirmCancelScheduledMessage(
+                                              item,
+                                            ),
+                                          )
+                                        : null,
+                                    icon: const Icon(
+                                      Icons.delete_outline_rounded,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _confirmCancelScheduledMessage(ScheduledMessageItem item) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Cancel scheduled message'),
+          content: const Text(
+            'This removes the pending scheduled delivery from the queue.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Keep'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Cancel message'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    final error = await ref
+        .read(chatThreadViewModelProvider(_threadArgs))
+        .cancelScheduledMessage(item.id);
+    if (error != null) {
+      _showSnack(error);
+      return;
+    }
+    _showSnack('Scheduled message canceled');
+  }
+
+  String _formatScheduledLabel(ScheduledMessageItem item) {
+    if (item.isWhenOnline) {
+      return item.errorMessage == null
+          ? 'Send when the other user is online'
+          : 'Waiting for online status. Last error: ${item.errorMessage}';
+    }
+    final scheduledAt = item.sendAt;
+    if (scheduledAt == null) {
+      return 'Scheduled message';
+    }
+    final localizations = MaterialLocalizations.of(context);
+    final date = localizations.formatMediumDate(scheduledAt.toLocal());
+    final time = localizations.formatTimeOfDay(
+      TimeOfDay.fromDateTime(scheduledAt.toLocal()),
+    );
+    return 'Send on $date at $time';
   }
 
   void _clearComposerMode() {
@@ -1609,6 +1914,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         sizeBytes: size,
         isImage: true,
         isAudio: false,
+        isVideo: false,
         filePath: filePath.isEmpty ? null : filePath,
         bytes: bytes,
         isUploading: true,
@@ -1890,6 +2196,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final vm = ref.watch(chatThreadViewModelProvider(_threadArgs));
     final appearance = ref.watch(appPreferencesProvider).appearance;
     final pinnedMessage = vm.pinnedMessage;
+    final scheduledPendingCount = vm.scheduledPendingCount;
     final replyTarget = _replyToMessageId == null
         ? null
         : _messageById(_replyToMessageId!);
@@ -1901,6 +2208,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       appBar: AppBar(
         title: Text(widget.chat.title),
         actions: [
+          IconButton(
+            tooltip: 'Scheduled messages',
+            onPressed: _showScheduledMessagesSheet,
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.schedule_outlined),
+                if (scheduledPendingCount > 0)
+                  Positioned(
+                    right: -context.sp(5),
+                    top: -context.sp(5),
+                    child: Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: context.sp(5),
+                        vertical: context.sp(1),
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.primary,
+                        borderRadius: BorderRadius.circular(context.sp(999)),
+                      ),
+                      child: Text(
+                        '$scheduledPendingCount',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onPrimary,
+                          fontSize: context.sp(10),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           Icon(
             _socketConnected
                 ? Icons.wifi_tethering_rounded
@@ -2310,6 +2650,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                                 ),
                         ),
                         SizedBox(width: context.sp(8)),
+                        IconButton.filledTonal(
+                          tooltip: 'Schedule message',
+                          onPressed:
+                              _canSend &&
+                                  _editingMessageId == null &&
+                                  !_voiceRecording &&
+                                  !_voiceUploading
+                              ? _showScheduleOptions
+                              : null,
+                          icon: const Icon(Icons.schedule_send_outlined),
+                        ),
+                        SizedBox(width: context.sp(8)),
                         FilledButton(
                           onPressed: _canSend ? _sendMessage : null,
                           child: vm.sending
@@ -2469,10 +2821,13 @@ class _PendingAttachmentPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    Widget placeholder() => _PendingAttachmentPlaceholder(attachment: attachment);
+    Widget placeholder() =>
+        _PendingAttachmentPlaceholder(attachment: attachment);
 
     if (attachment.isImage) {
-      if (!kIsWeb && attachment.filePath != null && attachment.filePath!.isNotEmpty) {
+      if (!kIsWeb &&
+          attachment.filePath != null &&
+          attachment.filePath!.isNotEmpty) {
         return Image.file(
           File(attachment.filePath!),
           fit: BoxFit.cover,
@@ -2771,8 +3126,8 @@ class _MessageBubble extends StatelessWidget {
                                         SizedBox(
                                           height: context.sp(140),
                                           width: double.infinity,
-                                          child: attachment.thumbnailUrl !=
-                                                      null &&
+                                          child:
+                                              attachment.thumbnailUrl != null &&
                                                   attachment.thumbnailUrl!
                                                       .trim()
                                                       .isNotEmpty
@@ -2784,15 +3139,13 @@ class _MessageBubble extends StatelessWidget {
                                                       ),
                                                   fit: BoxFit.cover,
                                                   errorWidget:
-                                                      (
-                                                        context,
-                                                        url,
-                                                        error,
-                                                      ) => _VideoAttachmentFallback(
-                                                        attachmentColor:
-                                                            attachmentColor,
-                                                        attachment: attachment,
-                                                      ),
+                                                      (context, url, error) =>
+                                                          _VideoAttachmentFallback(
+                                                            attachmentColor:
+                                                                attachmentColor,
+                                                            attachment:
+                                                                attachment,
+                                                          ),
                                                 )
                                               : _VideoAttachmentFallback(
                                                   attachmentColor:
@@ -2848,9 +3201,9 @@ class _MessageBubble extends StatelessWidget {
                                           fontSize:
                                               context.sp(11) *
                                               appearance.messageTextScale,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .onSurfaceVariant,
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.onSurfaceVariant,
                                         ),
                                       ),
                                     )
@@ -2865,9 +3218,9 @@ class _MessageBubble extends StatelessWidget {
                                           fontSize:
                                               context.sp(11) *
                                               appearance.messageTextScale,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .onSurfaceVariant,
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.onSurfaceVariant,
                                         ),
                                       ),
                                     ),

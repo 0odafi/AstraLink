@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.api.deps import get_current_user_from_raw_token
 from app.core.database import SessionLocal
 from app.models.chat import ChatMember, MessageDeliveryStatus
+from app.models.user import User
 from app.realtime.fanout import realtime_fanout
 from app.realtime.manager import chat_manager, user_realtime_manager
 from app.services.realtime_service import (
@@ -17,6 +18,7 @@ from app.services.chat_service import (
     serialize_messages,
     update_message_delivery_status,
 )
+from app.services.user_service import touch_last_seen
 
 router = APIRouter(tags=["Realtime"])
 
@@ -101,6 +103,13 @@ async def me_socket(
     await websocket.accept()
     db = SessionLocal()
     try:
+        live_user = db.scalar(select(User).where(User.id == user.id))
+        if live_user is not None:
+            touch_last_seen(db, live_user)
+    finally:
+        db.close()
+    db = SessionLocal()
+    try:
         replay_events = list_realtime_events_for_user(
             db,
             user_id=user.id,
@@ -136,6 +145,13 @@ async def me_socket(
             event_type = incoming.get("type")
 
             if event_type == "ping":
+                db = SessionLocal()
+                try:
+                    live_user = db.scalar(select(User).where(User.id == user.id))
+                    if live_user is not None:
+                        touch_last_seen(db, live_user)
+                finally:
+                    db.close()
                 await websocket.send_json({"type": "pong"})
                 continue
 
@@ -275,6 +291,13 @@ async def chat_socket(
         db.close()
 
     first_connection_for_user = await chat_manager.connect(chat_id, websocket, user.id)
+    db = SessionLocal()
+    try:
+        live_user = db.scalar(select(User).where(User.id == user.id))
+        if live_user is not None:
+            touch_last_seen(db, live_user)
+    finally:
+        db.close()
     await websocket.send_json({"type": "ready", "chat_id": chat_id, "user_id": user.id})
     if first_connection_for_user:
         await _broadcast_chat_event(
@@ -289,6 +312,13 @@ async def chat_socket(
             event_type = incoming.get("type")
 
             if event_type == "ping":
+                db = SessionLocal()
+                try:
+                    live_user = db.scalar(select(User).where(User.id == user.id))
+                    if live_user is not None:
+                        touch_last_seen(db, live_user)
+                finally:
+                    db.close()
                 await websocket.send_json({"type": "pong"})
                 continue
 

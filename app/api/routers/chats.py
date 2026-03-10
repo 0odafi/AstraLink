@@ -18,6 +18,8 @@ from app.schemas.chat import (
     ChatStateUpdate,
     MessageUpdate,
     ReactionCreate,
+    ScheduledMessageCreate,
+    ScheduledMessageOut,
 )
 from app.services.chat_service import (
     add_member,
@@ -37,6 +39,12 @@ from app.services.chat_service import (
     unpin_message,
     update_chat_state,
     update_message_content,
+)
+from app.services.scheduled_service import (
+    cancel_scheduled_message,
+    create_scheduled_message,
+    list_scheduled_messages,
+    serialize_scheduled_messages,
 )
 
 router = APIRouter(prefix="/chats", tags=["Chats"])
@@ -233,6 +241,95 @@ async def post_message(
         },
     )
     return serialized
+
+
+@router.get("/{chat_id}/scheduled-messages", response_model=list[ScheduledMessageOut])
+def get_scheduled_messages(
+    chat_id: int,
+    include_dispatched: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ScheduledMessageOut]:
+    try:
+        rows = list_scheduled_messages(
+            db,
+            chat_id=chat_id,
+            sender_id=current_user.id,
+            include_dispatched=include_dispatched,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    return serialize_scheduled_messages(db, rows)
+
+
+@router.post(
+    "/{chat_id}/scheduled-messages",
+    response_model=ScheduledMessageOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def post_scheduled_message(
+    chat_id: int,
+    payload: ScheduledMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ScheduledMessageOut:
+    try:
+        row = create_scheduled_message(
+            db,
+            chat_id=chat_id,
+            sender_id=current_user.id,
+            payload=payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    serialized = serialize_scheduled_messages(db, [row])[0]
+    await realtime_fanout.broadcast_user_event(
+        user_id=current_user.id,
+        payload={
+            "type": "scheduled_message_created",
+            "chat_id": chat_id,
+            "scheduled_message": serialized.model_dump(mode="json"),
+        },
+    )
+    return serialized
+
+
+@router.delete("/{chat_id}/scheduled-messages/{scheduled_message_id}")
+async def delete_scheduled_message(
+    chat_id: int,
+    scheduled_message_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    try:
+        row = cancel_scheduled_message(
+            db,
+            scheduled_message_id=scheduled_message_id,
+            sender_id=current_user.id,
+            chat_id=chat_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if message == "Scheduled message not found"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    await realtime_fanout.broadcast_user_event(
+        user_id=current_user.id,
+        payload={
+            "type": "scheduled_message_canceled",
+            "chat_id": chat_id,
+            "scheduled_message_id": scheduled_message_id,
+        },
+    )
+    return {
+        "chat_id": chat_id,
+        "scheduled_message_id": scheduled_message_id,
+        "removed": True,
+    }
 
 
 @router.patch("/messages/{message_id}", response_model=MessageOut)

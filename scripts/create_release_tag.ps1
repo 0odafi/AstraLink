@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Version,
 
-  [string]$RepoDir = "C:\Users\odafi\Desktop",
+  [string]$RepoDir = "C:\Users\odafi\Desktop\AstraLink",
 
   [string]$Remote = "origin",
 

@@ -301,7 +301,11 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
                                 child: Text(
                                   (row.user.displayName.trim().isEmpty
                                           ? '?'
-                                          : row.user.displayName.characters.first)
+                                          : row
+                                                .user
+                                                .displayName
+                                                .characters
+                                                .first)
                                       .toUpperCase(),
                                 ),
                               ),
@@ -325,8 +329,8 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
                                         dataStorage: _settings!.dataStorage,
                                         blockedUsersCount:
                                             ((_settings!.blockedUsersCount - 1)
-                                                .clamp(0, 1 << 31))
-                                            .toInt(),
+                                                    .clamp(0, 1 << 31))
+                                                .toInt(),
                                       );
                                     });
                                   }
@@ -555,7 +559,7 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
                   Text('Current version: ${widget.appVersion}'),
                   SizedBox(height: context.sp(10)),
                   DropdownButtonFormField<String>(
-                    value: widget.updateChannel,
+                    initialValue: widget.updateChannel,
                     items: const [
                       DropdownMenuItem(value: 'stable', child: Text('stable')),
                       DropdownMenuItem(value: 'beta', child: Text('beta')),
@@ -649,9 +653,9 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
                         child: Text(
                           'Installer: $_downloadedUpdatePath',
                           style: TextStyle(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onSurfaceVariant,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
                           ),
                         ),
                       ),
@@ -685,7 +689,8 @@ class _PrivacySettingsCard extends StatelessWidget {
     String? lastSeenVisibility,
     bool? showApproximateLastSeen,
     String? allowGroupInvites,
-  }) onPrivacyChanged;
+  })
+  onPrivacyChanged;
   final Future<void> Function() onShowBlockedUsers;
 
   const _PrivacySettingsCard({
@@ -745,9 +750,11 @@ class _PrivacySettingsCard extends StatelessWidget {
               SizedBox(height: context.sp(10)),
               _AudienceSelector(
                 label: 'Last seen & online',
-                subtitle: 'Choose visibility for exact or approximate last seen.',
+                subtitle:
+                    'Choose visibility for exact or approximate last seen.',
                 value: bundle.privacy.lastSeenVisibility,
-                onChanged: (value) => onPrivacyChanged(lastSeenVisibility: value),
+                onChanged: (value) =>
+                    onPrivacyChanged(lastSeenVisibility: value),
               ),
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
@@ -764,7 +771,8 @@ class _PrivacySettingsCard extends StatelessWidget {
                 label: 'Who can add me to groups',
                 subtitle: 'Foundation for invite and anti-spam controls.',
                 value: bundle.privacy.allowGroupInvites,
-                onChanged: (value) => onPrivacyChanged(allowGroupInvites: value),
+                onChanged: (value) =>
+                    onPrivacyChanged(allowGroupInvites: value),
               ),
               SizedBox(height: context.sp(10)),
               ListTile(
@@ -795,7 +803,8 @@ class _DataStorageSettingsCard extends StatelessWidget {
     bool? autoDownloadMusic,
     bool? autoDownloadFiles,
     int? defaultAutoDeleteSeconds,
-  }) onDataChanged;
+  })
+  onDataChanged;
   final Future<void> Function() onClearCache;
 
   const _DataStorageSettingsCard({
@@ -839,7 +848,7 @@ class _DataStorageSettingsCard extends StatelessWidget {
               )
             else ...[
               DropdownButtonFormField<int>(
-                value: bundle.dataStorage.keepMediaDays,
+                initialValue: bundle.dataStorage.keepMediaDays,
                 decoration: const InputDecoration(labelText: 'Keep media for'),
                 items: const [
                   DropdownMenuItem(value: 7, child: Text('7 days')),
@@ -855,8 +864,7 @@ class _DataStorageSettingsCard extends StatelessWidget {
               ),
               SizedBox(height: context.sp(10)),
               DropdownButtonFormField<int>(
-                value:
-                    bundle.dataStorage.defaultAutoDeleteSeconds ?? 0,
+                initialValue: bundle.dataStorage.defaultAutoDeleteSeconds ?? 0,
                 decoration: const InputDecoration(
                   labelText: 'Default auto-delete timer',
                 ),
@@ -879,29 +887,25 @@ class _DataStorageSettingsCard extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Auto-download photos'),
                 value: bundle.dataStorage.autoDownloadPhotos,
-                onChanged: (value) =>
-                    onDataChanged(autoDownloadPhotos: value),
+                onChanged: (value) => onDataChanged(autoDownloadPhotos: value),
               ),
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Auto-download videos'),
                 value: bundle.dataStorage.autoDownloadVideos,
-                onChanged: (value) =>
-                    onDataChanged(autoDownloadVideos: value),
+                onChanged: (value) => onDataChanged(autoDownloadVideos: value),
               ),
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Auto-download music & voice'),
                 value: bundle.dataStorage.autoDownloadMusic,
-                onChanged: (value) =>
-                    onDataChanged(autoDownloadMusic: value),
+                onChanged: (value) => onDataChanged(autoDownloadMusic: value),
               ),
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Auto-download files'),
                 value: bundle.dataStorage.autoDownloadFiles,
-                onChanged: (value) =>
-                    onDataChanged(autoDownloadFiles: value),
+                onChanged: (value) => onDataChanged(autoDownloadFiles: value),
               ),
               SizedBox(height: context.sp(8)),
               OutlinedButton.icon(
@@ -933,11 +937,8 @@ class _AudienceSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DropdownButtonFormField<String>(
-      value: value,
-      decoration: InputDecoration(
-        labelText: label,
-        helperText: subtitle,
-      ),
+      initialValue: value,
+      decoration: InputDecoration(labelText: label, helperText: subtitle),
       items: const [
         DropdownMenuItem(value: 'everyone', child: Text('Everybody')),
         DropdownMenuItem(value: 'contacts', child: Text('My contacts')),

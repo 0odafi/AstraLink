@@ -337,6 +337,70 @@ class AstraApi {
     return MessageItem.fromJson(_jsonMap(response));
   }
 
+  Future<List<ScheduledMessageItem>> listScheduledMessages({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    bool includeDispatched = false,
+  }) async {
+    final response = await _authorizedRequest(
+      'GET',
+      '/api/chats/$chatId/scheduled-messages'
+          '${includeDispatched ? '?include_dispatched=true' : ''}',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return _jsonList(
+      response,
+    ).map((item) => ScheduledMessageItem.fromJson(item)).toList();
+  }
+
+  Future<ScheduledMessageItem> scheduleMessage({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    required String content,
+    required String mode,
+    DateTime? sendAt,
+    int? replyToMessageId,
+    List<int> attachmentIds = const [],
+  }) async {
+    final payload = <String, dynamic>{'content': content, 'mode': mode};
+    if (sendAt != null) {
+      payload['send_at'] = sendAt.toUtc().toIso8601String();
+    }
+    if (replyToMessageId != null) {
+      payload['reply_to_message_id'] = replyToMessageId;
+    }
+    if (attachmentIds.isNotEmpty) {
+      payload['attachment_ids'] = attachmentIds;
+    }
+    final response = await _authorizedRequest(
+      'POST',
+      '/api/chats/$chatId/scheduled-messages',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      body: payload,
+    );
+    return ScheduledMessageItem.fromJson(_jsonMap(response));
+  }
+
+  Future<bool> cancelScheduledMessage({
+    required String accessToken,
+    String? refreshToken,
+    required int chatId,
+    required int scheduledMessageId,
+  }) async {
+    final response = await _authorizedRequest(
+      'DELETE',
+      '/api/chats/$chatId/scheduled-messages/$scheduledMessageId',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    final json = _jsonMap(response);
+    return (json['removed'] ?? false) == true;
+  }
+
   Future<MessageItem> updateMessage({
     required String accessToken,
     String? refreshToken,
@@ -728,13 +792,14 @@ class AstraApi {
       query.write('&kind_hint=${Uri.encodeQueryComponent(hint)}');
     }
 
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$baseUrl/api/media/upload?$query'),
-    )
-      ..headers['Accept'] = 'application/json'
-      ..headers['Authorization'] = 'Bearer $accessToken'
-      ..files.add(multipartFile);
+    final request =
+        http.MultipartRequest(
+            'POST',
+            Uri.parse('$baseUrl/api/media/upload?$query'),
+          )
+          ..headers['Accept'] = 'application/json'
+          ..headers['Authorization'] = 'Bearer $accessToken'
+          ..files.add(multipartFile);
 
     final streamed = await request.send();
     final response = await http.Response.fromStream(streamed);

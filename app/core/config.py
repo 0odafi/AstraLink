@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     twilio_messaging_service_sid: str | None = None
     redis_url: str | None = None
     redis_channel_prefix: str = "astralink"
+    scheduled_dispatch_poll_seconds: int = 5
+    scheduled_dispatch_batch_size: int = 50
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -19,6 +19,8 @@ from app.models.chat import (
     MessageLink,
     MessageReaction,
     PinnedMessage,
+    ScheduledMessage,
+    ScheduledMessageAttachment,
 )
 from app.models.user import User
 from app.schemas.chat import ChatCreate, MessageAttachmentOut, MessageOut, MessageReactionSummary
@@ -104,6 +106,14 @@ def create_or_get_private_chat(db: Session, owner_id: int, query: str) -> Chat:
         member_ids=[target_user.id],
     )
     return create_chat(db, owner_id=owner_id, payload=payload)
+
+
+def private_chat_peer_id(db: Session, chat_id: int, user_id: int) -> int | None:
+    return db.scalar(
+        select(ChatMember.user_id)
+        .where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id != user_id))
+        .limit(1)
+    )
 
 
 def _private_chat_display_name(db: Session, chat_id: int, user_id: int, fallback: str) -> str:
@@ -421,6 +431,8 @@ def create_message(
     reply_to_message_id: int | None = None,
     forward_from_message_id: int | None = None,
     attachment_ids: list[int] | None = None,
+    allow_committed_attachment_ids: set[int] | None = None,
+    auto_commit: bool = True,
 ) -> Message:
     chat = get_chat_for_member(db, chat_id=chat_id, user_id=sender_id)
     clean_content = content.strip()
@@ -429,11 +441,7 @@ def create_message(
         raise ValueError("Message must contain text or attachment")
 
     if chat.type == ChatType.PRIVATE:
-        peer_id = db.scalar(
-            select(ChatMember.user_id)
-            .where(and_(ChatMember.chat_id == chat_id, ChatMember.user_id != sender_id))
-            .limit(1)
-        )
+        peer_id = private_chat_peer_id(db, chat_id=chat_id, user_id=sender_id)
         if peer_id is not None:
             ensure_private_messaging_allowed(db, requester_id=sender_id, target_user_id=peer_id)
 
@@ -452,6 +460,7 @@ def create_message(
     db.add(message)
     db.flush()
 
+    allowed_reserved_ids = allow_committed_attachment_ids or set()
     if ordered_attachment_ids:
         media_rows = list(
             db.scalars(select(MediaFile).where(MediaFile.id.in_(ordered_attachment_ids))).all()
@@ -467,7 +476,7 @@ def create_message(
                 raise ValueError("Attachment belongs to another user")
             if media.chat_id != chat_id:
                 raise ValueError("Attachment was uploaded for another chat")
-            if media.is_committed:
+            if media.is_committed and media.id not in allowed_reserved_ids:
                 raise ValueError("Attachment is already used")
 
             media.is_committed = True
@@ -499,8 +508,11 @@ def create_message(
             )
         )
 
-    db.commit()
-    db.refresh(message)
+    if auto_commit:
+        db.commit()
+        db.refresh(message)
+    else:
+        db.flush()
     return message
 
 

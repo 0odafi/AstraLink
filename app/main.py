@@ -1,4 +1,6 @@
+import asyncio
 import html
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,11 +13,51 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.api.routers import auth, chats, media, public, realtime, releases, users
 from app.core.config import get_settings
+from app.core.database import SessionLocal
 from app.core.migrations import run_migrations
 from app.realtime.fanout import realtime_fanout
+from app.services.scheduled_service import dispatch_due_scheduled_messages
 from app.services.user_service import find_user_by_username
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+async def _scheduled_dispatch_loop() -> None:
+    while True:
+        db = SessionLocal()
+        try:
+            dispatched = dispatch_due_scheduled_messages(
+                db,
+                limit=settings.scheduled_dispatch_batch_size,
+            )
+        except Exception:
+            logger.exception("Scheduled message dispatch loop failed.")
+            dispatched = []
+        finally:
+            db.close()
+
+        for item in dispatched:
+            await realtime_fanout.broadcast_chat_event(
+                chat_id=item.chat_id,
+                member_ids=item.member_ids,
+                payload={
+                    "type": "message",
+                    "chat_id": item.chat_id,
+                    "message": item.serialized_message,
+                },
+            )
+            await realtime_fanout.broadcast_user_event(
+                user_id=item.sender_id,
+                payload={
+                    "type": "scheduled_message_dispatched",
+                    "chat_id": item.chat_id,
+                    "scheduled_message_id": item.scheduled_message_id,
+                    "message": item.serialized_message,
+                },
+            )
+
+        await asyncio.sleep(max(1, settings.scheduled_dispatch_poll_seconds))
 
 
 @asynccontextmanager
@@ -23,9 +65,15 @@ async def lifespan(_: FastAPI):
     if settings.database_auto_migrate:
         run_migrations()
     await realtime_fanout.startup()
+    dispatch_task = asyncio.create_task(_scheduled_dispatch_loop())
     try:
         yield
     finally:
+        dispatch_task.cancel()
+        try:
+            await dispatch_task
+        except asyncio.CancelledError:
+            pass
         await realtime_fanout.shutdown()
 
 

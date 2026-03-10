@@ -312,6 +312,80 @@ class MessageReactionItem {
   }
 }
 
+class ScheduledMessageItem {
+  final int id;
+  final int chatId;
+  final int senderId;
+  final int? targetUserId;
+  final String content;
+  final String mode;
+  final String status;
+  final DateTime? sendAt;
+  final int? replyToMessageId;
+  final List<MessageAttachmentItem> attachments;
+  final String? errorMessage;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime? dispatchedAt;
+  final DateTime? canceledAt;
+  final int? dispatchedMessageId;
+
+  const ScheduledMessageItem({
+    required this.id,
+    required this.chatId,
+    required this.senderId,
+    required this.targetUserId,
+    required this.content,
+    required this.mode,
+    required this.status,
+    required this.sendAt,
+    required this.replyToMessageId,
+    required this.attachments,
+    required this.errorMessage,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.dispatchedAt,
+    required this.canceledAt,
+    required this.dispatchedMessageId,
+  });
+
+  factory ScheduledMessageItem.fromJson(Map<String, dynamic> json) {
+    return ScheduledMessageItem(
+      id: json['id'] as int,
+      chatId: json['chat_id'] as int,
+      senderId: json['sender_id'] as int,
+      targetUserId: json['target_user_id'] as int?,
+      content: (json['content'] ?? '').toString(),
+      mode: (json['mode'] ?? 'at_time').toString(),
+      status: (json['status'] ?? 'pending').toString(),
+      sendAt: json['send_at'] == null
+          ? null
+          : DateTime.tryParse(json['send_at'].toString()),
+      replyToMessageId: json['reply_to_message_id'] as int?,
+      attachments: ((json['attachments'] as List?) ?? const [])
+          .whereType<Map>()
+          .map(
+            (row) =>
+                MessageAttachmentItem.fromJson(row.cast<String, dynamic>()),
+          )
+          .toList(),
+      errorMessage: json['error_message']?.toString(),
+      createdAt: DateTime.parse((json['created_at'] ?? '').toString()),
+      updatedAt: DateTime.parse((json['updated_at'] ?? '').toString()),
+      dispatchedAt: json['dispatched_at'] == null
+          ? null
+          : DateTime.tryParse(json['dispatched_at'].toString()),
+      canceledAt: json['canceled_at'] == null
+          ? null
+          : DateTime.tryParse(json['canceled_at'].toString()),
+      dispatchedMessageId: json['dispatched_message_id'] as int?,
+    );
+  }
+
+  bool get isPending => status == 'pending';
+  bool get isWhenOnline => mode == 'when_online';
+}
+
 class MessageAttachmentItem {
   final int id;
   final String fileName;
@@ -357,14 +431,15 @@ class MessageAttachmentItem {
       sizeBytes: (json['size_bytes'] ?? 0) as int,
       url: (json['url'] ?? '').toString(),
       isImage: (json['is_image'] ?? mediaKind == 'image') == true,
-      isAudio: (json['is_audio'] ??
+      isAudio:
+          (json['is_audio'] ??
               mediaKind == 'audio' ||
-              mediaKind == 'voice' ||
-              normalizedMime.startsWith('audio/')) ==
+                  mediaKind == 'voice' ||
+                  normalizedMime.startsWith('audio/')) ==
           true,
-      isVideo: (json['is_video'] ??
-              mediaKind == 'video' ||
-              normalizedMime.startsWith('video/')) ==
+      isVideo:
+          (json['is_video'] ??
+              mediaKind == 'video' || normalizedMime.startsWith('video/')) ==
           true,
       isVoice: (json['is_voice'] ?? mediaKind == 'voice') == true,
       width: json['width'] as int?,
@@ -459,7 +534,8 @@ class ReleaseInfo {
       notes: (json['notes'] ?? '').toString(),
       packageKind: (json['package_kind'] ?? 'package').toString(),
       installStrategy: (json['install_strategy'] ?? 'external').toString(),
-      inAppDownloadSupported: (json['in_app_download_supported'] ?? false) == true,
+      inAppDownloadSupported:
+          (json['in_app_download_supported'] ?? false) == true,
       restartRequired: (json['restart_required'] ?? true) == true,
       fileSizeBytes: json['file_size_bytes'] as int?,
       sha256: json['sha256']?.toString(),
@@ -485,14 +561,13 @@ class UserPrivacySettings {
   factory UserPrivacySettings.fromJson(Map<String, dynamic> json) {
     return UserPrivacySettings(
       phoneVisibility: (json['phone_visibility'] ?? 'everyone').toString(),
-      phoneSearchVisibility:
-          (json['phone_search_visibility'] ?? 'everyone').toString(),
+      phoneSearchVisibility: (json['phone_search_visibility'] ?? 'everyone')
+          .toString(),
       lastSeenVisibility: (json['last_seen_visibility'] ?? 'everyone')
           .toString(),
       showApproximateLastSeen:
           (json['show_approximate_last_seen'] ?? true) == true,
-      allowGroupInvites:
-          (json['allow_group_invites'] ?? 'everyone').toString(),
+      allowGroupInvites: (json['allow_group_invites'] ?? 'everyone').toString(),
     );
   }
 }

@@ -2,7 +2,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.chat import ChatType, MediaKind, MemberRole, MessageDeliveryStatus
+from app.models.chat import (
+    ChatType,
+    MediaKind,
+    MemberRole,
+    MessageDeliveryStatus,
+    ScheduledMessageMode,
+    ScheduledMessageStatus,
+)
 
 
 class ChatCreate(BaseModel):
@@ -61,6 +68,26 @@ class MessageCreate(BaseModel):
         has_attachments = bool(self.attachment_ids)
         if not has_content and not has_attachments:
             raise ValueError("Message must contain text or attachment")
+        return self
+
+
+class ScheduledMessageCreate(BaseModel):
+    content: str = Field(default="", max_length=10000)
+    reply_to_message_id: int | None = None
+    attachment_ids: list[int] = Field(default_factory=list)
+    mode: ScheduledMessageMode = ScheduledMessageMode.AT_TIME
+    send_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        has_content = bool(self.content.strip())
+        has_attachments = bool(self.attachment_ids)
+        if not has_content and not has_attachments:
+            raise ValueError("Scheduled message must contain text or attachment")
+        if self.mode == ScheduledMessageMode.AT_TIME and self.send_at is None:
+            raise ValueError("send_at is required for scheduled messages")
+        if self.mode == ScheduledMessageMode.WHEN_ONLINE and self.send_at is not None:
+            self.send_at = None
         return self
 
 
@@ -124,6 +151,25 @@ class MessageSearchOut(BaseModel):
 
 class MessageUpdate(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
+
+
+class ScheduledMessageOut(BaseModel):
+    id: int
+    chat_id: int
+    sender_id: int
+    target_user_id: int | None = None
+    content: str
+    mode: ScheduledMessageMode
+    status: ScheduledMessageStatus
+    send_at: datetime | None = None
+    reply_to_message_id: int | None = None
+    attachments: list[MessageAttachmentOut] = Field(default_factory=list)
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    dispatched_at: datetime | None = None
+    canceled_at: datetime | None = None
+    dispatched_message_id: int | None = None
 
 
 class MediaUploadOut(BaseModel):

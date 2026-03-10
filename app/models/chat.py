@@ -29,6 +29,18 @@ class MessageDeliveryStatus(str, Enum):
     READ = "read"
 
 
+class ScheduledMessageMode(str, Enum):
+    AT_TIME = "at_time"
+    WHEN_ONLINE = "when_online"
+
+
+class ScheduledMessageStatus(str, Enum):
+    PENDING = "pending"
+    DISPATCHED = "dispatched"
+    CANCELED = "canceled"
+    FAILED = "failed"
+
+
 class MediaKind(str, Enum):
     FILE = "file"
     IMAGE = "image"
@@ -51,6 +63,10 @@ class Chat(Base):
     owner: Mapped["User"] = relationship(back_populates="owned_chats")
     memberships: Mapped[list["ChatMember"]] = relationship(back_populates="chat", cascade="all, delete-orphan")
     messages: Mapped[list["Message"]] = relationship(back_populates="chat", cascade="all, delete-orphan")
+    scheduled_messages: Mapped[list["ScheduledMessage"]] = relationship(
+        back_populates="chat",
+        cascade="all, delete-orphan",
+    )
 
 
 class ChatMember(Base):
@@ -182,6 +198,10 @@ class MediaFile(Base):
         back_populates="media_file",
         cascade="all, delete-orphan",
     )
+    scheduled_attachments: Mapped[list["ScheduledMessageAttachment"]] = relationship(
+        back_populates="media_file",
+        cascade="all, delete-orphan",
+    )
 
 
 class MessageAttachment(Base):
@@ -211,3 +231,78 @@ class PinnedMessage(Base):
     pinned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     message: Mapped["Message"] = relationship(back_populates="pins")
+
+
+class ScheduledMessage(Base):
+    __tablename__ = "scheduled_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    target_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    mode: Mapped[ScheduledMessageMode] = mapped_column(
+        SqlEnum(ScheduledMessageMode),
+        default=ScheduledMessageMode.AT_TIME,
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[ScheduledMessageStatus] = mapped_column(
+        SqlEnum(ScheduledMessageStatus),
+        default=ScheduledMessageStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+    send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    reply_to_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    dispatched_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    canceled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    chat: Mapped["Chat"] = relationship(back_populates="scheduled_messages")
+    attachments: Mapped[list["ScheduledMessageAttachment"]] = relationship(
+        back_populates="scheduled_message",
+        cascade="all, delete-orphan",
+        order_by="ScheduledMessageAttachment.sort_order",
+    )
+
+
+class ScheduledMessageAttachment(Base):
+    __tablename__ = "scheduled_message_attachments"
+    __table_args__ = (
+        UniqueConstraint(
+            "scheduled_message_id",
+            "media_file_id",
+            name="uq_scheduled_message_attachment_media",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scheduled_message_id: Mapped[int] = mapped_column(
+        ForeignKey("scheduled_messages.id", ondelete="CASCADE"),
+        index=True,
+    )
+    media_file_id: Mapped[int] = mapped_column(ForeignKey("media_files.id", ondelete="CASCADE"), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    scheduled_message: Mapped["ScheduledMessage"] = relationship(back_populates="attachments")
+    media_file: Mapped["MediaFile"] = relationship(back_populates="scheduled_attachments")
