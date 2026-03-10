@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import hashlib
 import re
 import secrets
@@ -16,6 +17,7 @@ from app.core.security import (
 )
 from app.models.user import PhoneLoginCode, RefreshToken, User
 from app.schemas.auth import (
+    AuthSessionOut,
     PhoneCodeResponse,
     PhoneCodeVerifyRequest,
     RegisterRequest,
@@ -31,6 +33,26 @@ from app.services.user_service import (
 )
 from app.services.sms_service import send_login_code
 
+
+@dataclass(frozen=True, slots=True)
+class ClientContext:
+    device_name: str | None = None
+    platform: str | None = None
+    user_agent: str | None = None
+    ip_address: str | None = None
+
+
+_PLATFORM_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("android", "Android"),
+    ("iphone", "iPhone"),
+    ("ipad", "iPad"),
+    ("ios", "iOS"),
+    ("windows", "Windows"),
+    ("mac os", "macOS"),
+    ("macintosh", "macOS"),
+    ("linux", "Linux"),
+    ("web", "Web"),
+)
 
 
 def _now_like(reference: datetime | None = None) -> datetime:
@@ -50,6 +72,67 @@ def _synthetic_email(seed: str) -> str:
     if not safe_seed:
         safe_seed = f"user{secrets.token_hex(2)}"
     return f"{safe_seed}.{token}@phone.astralink.local"
+
+
+def _clean_text(value: str | None, max_length: int) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_length]
+
+
+def _detect_platform(explicit_platform: str | None, user_agent: str | None) -> str | None:
+    platform = _clean_text(explicit_platform, 40)
+    if platform is not None:
+        normalized = platform.lower()
+        for raw_token, label in _PLATFORM_PATTERNS:
+            if raw_token in normalized:
+                return label
+        return platform
+
+    normalized_agent = (user_agent or "").lower()
+    for raw_token, label in _PLATFORM_PATTERNS:
+        if raw_token in normalized_agent:
+            return label
+    return None
+
+
+def _default_device_name(platform: str | None) -> str | None:
+    if platform is None:
+        return None
+    return f"AstraLink {platform}"
+
+
+def build_client_context(
+    *,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+    platform: str | None = None,
+    device_name: str | None = None,
+) -> ClientContext:
+    cleaned_user_agent = _clean_text(user_agent, 255)
+    detected_platform = _detect_platform(platform, cleaned_user_agent)
+    cleaned_device_name = _clean_text(device_name, 120) or _default_device_name(detected_platform)
+    cleaned_ip = _clean_text(ip_address, 64)
+    return ClientContext(
+        device_name=cleaned_device_name,
+        platform=detected_platform,
+        user_agent=cleaned_user_agent,
+        ip_address=cleaned_ip,
+    )
+
+
+def _merge_client_context(existing: RefreshToken, incoming: ClientContext | None) -> ClientContext:
+    context = incoming or ClientContext()
+    platform = context.platform or _clean_text(existing.platform, 40)
+    return ClientContext(
+        device_name=context.device_name or _clean_text(existing.device_name, 120) or _default_device_name(platform),
+        platform=platform,
+        user_agent=context.user_agent or _clean_text(existing.user_agent, 255),
+        ip_address=context.ip_address or _clean_text(existing.ip_address, 64),
+    )
 
 
 def _cleanup_phone_codes(db: Session, now: datetime) -> None:
@@ -162,7 +245,6 @@ def verify_phone_login_code(db: Session, payload: PhoneCodeVerifyRequest) -> tup
         db.add(user)
         created = True
     else:
-        # Fill profile defaults for legacy users if missing.
         if not user.first_name and payload.first_name:
             user.first_name = payload.first_name.strip()
         if not user.last_name and payload.last_name:
@@ -215,22 +297,34 @@ def authenticate_user(db: Session, login: str, password: str) -> User | None:
     return user
 
 
-def _issue_refresh_token(db: Session, user_id: int) -> str:
+def _issue_refresh_token(
+    db: Session,
+    *,
+    user_id: int,
+    client_context: ClientContext | None = None,
+    session_key: str | None = None,
+) -> tuple[RefreshToken, str]:
     settings = get_settings()
     raw_token = generate_refresh_token()
     hashed_token = hash_refresh_token(raw_token)
     now = _now_like()
     expires_at = now + timedelta(days=settings.refresh_token_expire_days)
+    context = client_context or ClientContext()
 
-    db.add(
-        RefreshToken(
-            user_id=user_id,
-            token_hash=hashed_token,
-            expires_at=expires_at,
-            last_used_at=now,
-        )
+    token_row = RefreshToken(
+        user_id=user_id,
+        session_key=session_key or secrets.token_hex(16),
+        token_hash=hashed_token,
+        device_name=context.device_name,
+        platform=context.platform,
+        user_agent=context.user_agent,
+        ip_address=context.ip_address,
+        expires_at=expires_at,
+        last_used_at=now,
     )
-    return raw_token
+    db.add(token_row)
+    db.flush()
+    return token_row, raw_token
 
 
 def build_token_response(
@@ -238,12 +332,18 @@ def build_token_response(
     user: User,
     *,
     needs_profile_setup: bool = False,
+    client_context: ClientContext | None = None,
 ) -> TokenResponse:
-    access_token = create_access_token(str(user.id))
-    refresh_token = _issue_refresh_token(db, user_id=user.id)
+    session_row, refresh_token = _issue_refresh_token(
+        db,
+        user_id=user.id,
+        client_context=client_context,
+    )
+    access_token = create_access_token(str(user.id), session_id=session_row.id)
     user.last_seen_at = _now_like(user.last_seen_at)
     db.add(user)
     db.commit()
+    db.refresh(user)
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -252,7 +352,12 @@ def build_token_response(
     )
 
 
-def rotate_refresh_token(db: Session, refresh_token: str) -> TokenResponse:
+def rotate_refresh_token(
+    db: Session,
+    refresh_token: str,
+    *,
+    client_context: ClientContext | None = None,
+) -> TokenResponse:
     token_hash = hash_refresh_token(refresh_token)
     stored_token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
     if not stored_token:
@@ -269,9 +374,16 @@ def rotate_refresh_token(db: Session, refresh_token: str) -> TokenResponse:
     stored_token.last_used_at = now
     db.add(stored_token)
 
-    access_token = create_access_token(str(user.id))
-    new_refresh_token = _issue_refresh_token(db, user_id=user.id)
+    merged_context = _merge_client_context(stored_token, client_context)
+    next_session_row, new_refresh_token = _issue_refresh_token(
+        db,
+        user_id=user.id,
+        client_context=merged_context,
+        session_key=stored_token.session_key,
+    )
+    access_token = create_access_token(str(user.id), session_id=next_session_row.id)
     db.commit()
+    db.refresh(user)
     return TokenResponse(
         access_token=access_token,
         refresh_token=new_refresh_token,
@@ -291,3 +403,114 @@ def revoke_refresh_token(db: Session, refresh_token: str) -> bool:
     db.add(stored_token)
     db.commit()
     return True
+
+
+def list_active_sessions(
+    db: Session,
+    *,
+    user_id: int,
+    current_session_id: int | None = None,
+) -> list[AuthSessionOut]:
+    now = _now_like()
+    rows = list(
+        db.scalars(
+            select(RefreshToken)
+            .where(
+                and_(
+                    RefreshToken.user_id == user_id,
+                    RefreshToken.revoked_at.is_(None),
+                    RefreshToken.expires_at > now,
+                )
+            )
+            .order_by(RefreshToken.last_used_at.desc(), RefreshToken.created_at.desc())
+        ).all()
+    )
+
+    deduped: list[AuthSessionOut] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        session_key = (row.session_key or "").strip() or f"legacy-{row.id}"
+        if session_key in seen_keys:
+            continue
+        seen_keys.add(session_key)
+        deduped.append(
+            AuthSessionOut(
+                session_id=session_key,
+                device_name=row.device_name,
+                platform=row.platform,
+                user_agent=row.user_agent,
+                ip_address=row.ip_address,
+                created_at=row.created_at,
+                last_used_at=row.last_used_at,
+                expires_at=row.expires_at,
+                is_current=current_session_id is not None and row.id == current_session_id,
+            )
+        )
+    return deduped
+
+
+def revoke_session_by_key(
+    db: Session,
+    *,
+    user_id: int,
+    session_key: str,
+    current_session_key: str | None = None,
+) -> bool:
+    normalized_key = session_key.strip()
+    if not normalized_key:
+        return False
+    if current_session_key is not None and normalized_key == current_session_key:
+        raise ValueError("Use logout to close the current session")
+
+    rows = list(
+        db.scalars(
+            select(RefreshToken).where(
+                and_(
+                    RefreshToken.user_id == user_id,
+                    RefreshToken.session_key == normalized_key,
+                    RefreshToken.revoked_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    if not rows:
+        return False
+
+    for row in rows:
+        row.revoked_at = _now_like(row.expires_at)
+        row.last_used_at = _now_like(row.last_used_at)
+        db.add(row)
+    db.commit()
+    return True
+
+
+def revoke_other_sessions(
+    db: Session,
+    *,
+    user_id: int,
+    current_session_key: str | None,
+) -> int:
+    if current_session_key is None or not current_session_key.strip():
+        return 0
+
+    rows = list(
+        db.scalars(
+            select(RefreshToken).where(
+                and_(
+                    RefreshToken.user_id == user_id,
+                    RefreshToken.revoked_at.is_(None),
+                    RefreshToken.session_key != current_session_key,
+                )
+            )
+        ).all()
+    )
+    if not rows:
+        return 0
+
+    revoked_keys = {(row.session_key or "").strip() or f"legacy-{row.id}" for row in rows}
+    for row in rows:
+        row.revoked_at = _now_like(row.expires_at)
+        row.last_used_at = _now_like(row.last_used_at)
+        db.add(row)
+    db.commit()
+    return len(revoked_keys)

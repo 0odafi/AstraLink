@@ -158,6 +158,48 @@ class AstraApi {
     return _authResultFromJson(_jsonMap(response));
   }
 
+  Future<List<AuthSessionItem>> authSessions({
+    required String accessToken,
+    String? refreshToken,
+  }) async {
+    final response = await _authorizedRequest(
+      'GET',
+      '/api/auth/sessions',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return _jsonList(
+      response,
+    ).map((item) => AuthSessionItem.fromJson(item)).toList();
+  }
+
+  Future<bool> revokeAuthSession({
+    required String accessToken,
+    String? refreshToken,
+    required String sessionId,
+  }) async {
+    final response = await _authorizedRequest(
+      'DELETE',
+      '/api/auth/sessions/${Uri.encodeComponent(sessionId)}',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return (_jsonMap(response)['removed'] ?? false) == true;
+  }
+
+  Future<int> revokeOtherAuthSessions({
+    required String accessToken,
+    String? refreshToken,
+  }) async {
+    final response = await _authorizedRequest(
+      'POST',
+      '/api/auth/sessions/revoke-others',
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+    return (_jsonMap(response)['revoked'] ?? 0) as int;
+  }
+
   Future<AppUser> me({
     required String accessToken,
     String? refreshToken,
@@ -792,14 +834,14 @@ class AstraApi {
       query.write('&kind_hint=${Uri.encodeQueryComponent(hint)}');
     }
 
-    final request =
-        http.MultipartRequest(
-            'POST',
-            Uri.parse('$baseUrl/api/media/upload?$query'),
-          )
-          ..headers['Accept'] = 'application/json'
-          ..headers['Authorization'] = 'Bearer $accessToken'
-          ..files.add(multipartFile);
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$baseUrl/api/media/upload?$query'),
+    )
+      ..headers.addAll(_clientMetadataHeaders())
+      ..headers['Accept'] = 'application/json'
+      ..headers['Authorization'] = 'Bearer $accessToken'
+      ..files.add(multipartFile);
 
     final streamed = await request.send();
     final response = await http.Response.fromStream(streamed);
@@ -826,6 +868,7 @@ class AstraApi {
     final mergedHeaders = <String, String>{
       'Accept': 'application/json',
       if (body != null) 'Content-Type': 'application/json',
+      ..._clientMetadataHeaders(),
       ...?headers,
     };
 
@@ -870,6 +913,22 @@ class AstraApi {
       _extractErrorMessage(response),
       statusCode: response.statusCode,
     );
+  }
+
+  Map<String, String> _clientMetadataHeaders() {
+    final platform = runtimePlatformKey();
+    final deviceName = switch (defaultTargetPlatform) {
+      TargetPlatform.android => 'AstraLink Android',
+      TargetPlatform.iOS => 'AstraLink iOS',
+      TargetPlatform.windows => 'AstraLink Windows',
+      TargetPlatform.macOS => 'AstraLink macOS',
+      TargetPlatform.linux => 'AstraLink Linux',
+      _ => kIsWeb ? 'AstraLink Web' : 'AstraLink Device',
+    };
+    return {
+      'X-AstraLink-Client-Platform': platform,
+      'X-AstraLink-Device-Name': deviceName,
+    };
   }
 
   AuthResult _authResultFromJson(Map<String, dynamic> json) {

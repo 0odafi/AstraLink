@@ -14,6 +14,13 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _client_headers(platform: str, device_name: str) -> dict[str, str]:
+    return {
+        "X-AstraLink-Client-Platform": platform,
+        "X-AstraLink-Device-Name": device_name,
+    }
+
+
 def _recv_by_type(websocket, expected_type: str, max_events: int = 10):
     for _ in range(max_events):
         payload = websocket.receive_json()
@@ -22,7 +29,15 @@ def _recv_by_type(websocket, expected_type: str, max_events: int = 10):
     raise AssertionError(f"Event '{expected_type}' was not received in {max_events} frames")
 
 
-def _auth_by_phone(client, phone: str, first_name: str, last_name: str):
+def _auth_by_phone(
+    client,
+    phone: str,
+    first_name: str,
+    last_name: str,
+    *,
+    platform: str = "android",
+    device_name: str | None = None,
+):
     request_code = client.post("/api/auth/request-code", json={"phone": phone})
     assert request_code.status_code == 200, request_code.text
     request_payload = request_code.json()
@@ -32,6 +47,7 @@ def _auth_by_phone(client, phone: str, first_name: str, last_name: str):
 
     verify_code = client.post(
         "/api/auth/verify-code",
+        headers=_client_headers(platform, device_name or f"{first_name} Phone"),
         json={
             "phone": request_payload["phone"],
             "code_token": request_payload["code_token"],
@@ -473,6 +489,94 @@ def test_refresh_and_release_endpoint(client):
     assert release.status_code == 200, release.text
     assert release.json()["platform"] == "windows"
     assert "volds.ru" in release.json()["download_url"]
+
+
+def test_device_sessions_list_and_remote_termination(client):
+    phone = "+7 900 556 22 33"
+    first = _auth_by_phone(
+        client,
+        phone,
+        "Phone",
+        "Device",
+        platform="android",
+        device_name="Phone Device",
+    )
+    first_headers = _auth_headers(first["access_token"])
+
+    listed_first = client.get("/api/auth/sessions", headers=first_headers)
+    assert listed_first.status_code == 200, listed_first.text
+    first_rows = listed_first.json()
+    assert len(first_rows) == 1
+    assert first_rows[0]["is_current"] is True
+    assert first_rows[0]["device_name"] == "Phone Device"
+    assert first_rows[0]["platform"] == "Android"
+
+    request_second = client.post("/api/auth/request-code", json={"phone": phone})
+    assert request_second.status_code == 200, request_second.text
+    verify_second = client.post(
+        "/api/auth/verify-code",
+        headers=_client_headers("windows", "Desk App"),
+        json={
+            "phone": request_second.json()["phone"],
+            "code_token": request_second.json()["code_token"],
+            "code": TEST_AUTH_CODE,
+        },
+    )
+    assert verify_second.status_code == 200, verify_second.text
+    second = verify_second.json()
+    second_headers = _auth_headers(second["access_token"])
+
+    listed_second = client.get("/api/auth/sessions", headers=second_headers)
+    assert listed_second.status_code == 200, listed_second.text
+    second_rows = listed_second.json()
+    assert len(second_rows) == 2
+    current_second = next(row for row in second_rows if row["is_current"] is True)
+    other_second = next(row for row in second_rows if row["is_current"] is False)
+    assert current_second["device_name"] == "Desk App"
+    assert current_second["platform"] == "Windows"
+    assert other_second["device_name"] == "Phone Device"
+
+    removed = client.delete(
+        f"/api/auth/sessions/{other_second['session_id']}",
+        headers=second_headers,
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"removed": True}
+
+    first_after_remove = client.get("/api/users/me", headers=first_headers)
+    assert first_after_remove.status_code == 401, first_after_remove.text
+
+    request_third = client.post("/api/auth/request-code", json={"phone": phone})
+    assert request_third.status_code == 200, request_third.text
+    verify_third = client.post(
+        "/api/auth/verify-code",
+        headers=_client_headers("web", "Browser App"),
+        json={
+            "phone": request_third.json()["phone"],
+            "code_token": request_third.json()["code_token"],
+            "code": TEST_AUTH_CODE,
+        },
+    )
+    assert verify_third.status_code == 200, verify_third.text
+    third = verify_third.json()
+    third_headers = _auth_headers(third["access_token"])
+
+    revoke_others = client.post(
+        "/api/auth/sessions/revoke-others",
+        headers=third_headers,
+    )
+    assert revoke_others.status_code == 200, revoke_others.text
+    assert revoke_others.json()["revoked"] == 1
+
+    second_after_revoke = client.get("/api/users/me", headers=second_headers)
+    assert second_after_revoke.status_code == 401, second_after_revoke.text
+
+    listed_third = client.get("/api/auth/sessions", headers=third_headers)
+    assert listed_third.status_code == 200, listed_third.text
+    third_rows = listed_third.json()
+    assert len(third_rows) == 1
+    assert third_rows[0]["is_current"] is True
+    assert third_rows[0]["device_name"] == "Browser App"
 
 
 def test_database_is_versioned_after_startup(client):

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 from app.schemas.user import UserPublic
@@ -43,3 +45,19 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     needs_profile_setup: bool = False
     user: UserPublic
+
+
+class AuthSessionOut(BaseModel):
+    session_id: str
+    device_name: str | None = None
+    platform: str | None = None
+    user_agent: str | None = None
+    ip_address: str | None = None
+    created_at: datetime
+    last_used_at: datetime | None = None
+    expires_at: datetime
+    is_current: bool = False
+
+
+class RevokeSessionsOut(BaseModel):
+    revoked: int

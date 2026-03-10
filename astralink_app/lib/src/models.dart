@@ -628,6 +628,74 @@ class UserSettingsBundle {
   }
 }
 
+class AuthSessionItem {
+  final String sessionId;
+  final String? deviceName;
+  final String? platform;
+  final String? userAgent;
+  final String? ipAddress;
+  final DateTime createdAt;
+  final DateTime? lastUsedAt;
+  final DateTime expiresAt;
+  final bool isCurrent;
+
+  const AuthSessionItem({
+    required this.sessionId,
+    required this.deviceName,
+    required this.platform,
+    required this.userAgent,
+    required this.ipAddress,
+    required this.createdAt,
+    required this.lastUsedAt,
+    required this.expiresAt,
+    required this.isCurrent,
+  });
+
+  factory AuthSessionItem.fromJson(Map<String, dynamic> json) {
+    return AuthSessionItem(
+      sessionId: (json['session_id'] ?? '').toString(),
+      deviceName: json['device_name']?.toString(),
+      platform: json['platform']?.toString(),
+      userAgent: json['user_agent']?.toString(),
+      ipAddress: json['ip_address']?.toString(),
+      createdAt: DateTime.parse((json['created_at'] ?? '').toString()),
+      lastUsedAt: json['last_used_at'] == null
+          ? null
+          : DateTime.tryParse(json['last_used_at'].toString()),
+      expiresAt: DateTime.parse((json['expires_at'] ?? '').toString()),
+      isCurrent: (json['is_current'] ?? false) == true,
+    );
+  }
+
+  String get title {
+    final explicit = deviceName?.trim();
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    final platformLabel = platform?.trim();
+    if (platformLabel != null && platformLabel.isNotEmpty) {
+      return 'AstraLink $platformLabel';
+    }
+    return 'AstraLink session';
+  }
+
+  String get subtitle {
+    final parts = <String>[];
+    final platformLabel = platform?.trim();
+    if (platformLabel != null && platformLabel.isNotEmpty) {
+      parts.add(platformLabel);
+    }
+    final ipLabel = ipAddress?.trim();
+    if (ipLabel != null && ipLabel.isNotEmpty) {
+      parts.add(ipLabel);
+    }
+    final agent = userAgent?.trim();
+    if (agent != null && agent.isNotEmpty) {
+      parts.add(agent);
+    }
+    if (parts.isEmpty) return 'Active session';
+    return parts.join(' • ');
+  }
+}
+
 class BlockedUserItem {
   final AppUser user;
   final DateTime blockedAt;

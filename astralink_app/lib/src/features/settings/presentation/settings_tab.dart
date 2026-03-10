@@ -41,6 +41,8 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
   double? _downloadProgress;
   ReleaseInfo? _latest;
   UserSettingsBundle? _settings;
+  bool _loadingSessions = false;
+  List<AuthSessionItem> _sessions = const [];
   CachedAttachmentStats _cacheStats = CachedAttachmentStats.empty;
   bool _loadingCacheStats = false;
   DownloadedUpdatePackage? _downloadedUpdate;
@@ -49,6 +51,7 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
   void initState() {
     super.initState();
     _loadSettings();
+    _loadSessions(silent: true);
     _refreshCacheStats();
   }
 
@@ -70,6 +73,194 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
         setState(() => _loadingSettings = false);
       }
     }
+  }
+
+  Future<void> _loadSessions({bool silent = false}) async {
+    final tokens = widget.getTokens();
+    if (tokens == null || _loadingSessions) return;
+    if (!silent) {
+      setState(() => _loadingSessions = true);
+    } else {
+      _loadingSessions = true;
+    }
+    try {
+      final rows = await widget.api.authSessions(
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+      );
+      if (!mounted) return;
+      setState(() => _sessions = rows);
+    } catch (error) {
+      if (!silent) {
+        _showSnack(error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loadingSessions = false);
+      } else {
+        _loadingSessions = false;
+      }
+    }
+  }
+
+  Future<void> _showSessionsManager() async {
+    final tokens = widget.getTokens();
+    if (tokens == null) {
+      _showSnack('Session expired');
+      return;
+    }
+    await _loadSessions(silent: true);
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) {
+        final localRows = List<AuthSessionItem>.from(_sessions);
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            AuthSessionItem? currentSession;
+            for (final item in localRows) {
+              if (item.isCurrent) {
+                currentSession = item;
+                break;
+              }
+            }
+            final otherSessions = localRows.where((item) => !item.isCurrent).toList();
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: context.sp(12),
+                  right: context.sp(12),
+                  top: context.sp(12),
+                  bottom: context.sp(12),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Devices',
+                      style: TextStyle(
+                        fontSize: context.sp(18),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    SizedBox(height: context.sp(6)),
+                    Text(
+                      '${localRows.length} active session(s)',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    SizedBox(height: context.sp(10)),
+                    if (currentSession != null) ...[
+                      Text(
+                        'This device',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: context.sp(14),
+                        ),
+                      ),
+                      SizedBox(height: context.sp(6)),
+                      _SessionTile(
+                        session: currentSession,
+                        trailing: Chip(
+                          label: const Text('Current'),
+                          avatar: const Icon(Icons.smartphone_rounded),
+                        ),
+                      ),
+                      SizedBox(height: context.sp(10)),
+                    ],
+                    Row(
+                      children: [
+                        Text(
+                          'Other sessions',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: context.sp(14),
+                          ),
+                        ),
+                        const Spacer(),
+                        TextButton.icon(
+                          onPressed: otherSessions.isEmpty
+                              ? null
+                              : () async {
+                                  try {
+                                    final revoked = await widget.api.revokeOtherAuthSessions(
+                                      accessToken: tokens.accessToken,
+                                      refreshToken: tokens.refreshToken,
+                                    );
+                                    localRows.removeWhere((item) => !item.isCurrent);
+                                    setSheetState(() {});
+                                    if (!mounted) return;
+                                    setState(() => _sessions = List<AuthSessionItem>.from(localRows));
+                                    _showSnack('Terminated $revoked other session(s)');
+                                  } catch (error) {
+                                    _showSnack(error.toString());
+                                  }
+                                },
+                          icon: const Icon(Icons.logout_rounded),
+                          label: const Text('Terminate all others'),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: context.sp(6)),
+                    if (otherSessions.isEmpty)
+                      Padding(
+                        padding: EdgeInsets.all(context.sp(20)),
+                        child: Text(
+                          'No other active sessions',
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      )
+                    else
+                      Flexible(
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: otherSessions.length,
+                          separatorBuilder: (_, _) => const Divider(height: 1),
+                          itemBuilder: (context, index) {
+                            final session = otherSessions[index];
+                            return _SessionTile(
+                              session: session,
+                              trailing: IconButton(
+                                tooltip: 'Terminate session',
+                                onPressed: () async {
+                                  try {
+                                    final removed = await widget.api.revokeAuthSession(
+                                      accessToken: tokens.accessToken,
+                                      refreshToken: tokens.refreshToken,
+                                      sessionId: session.sessionId,
+                                    );
+                                    if (!removed) return;
+                                    localRows.removeWhere(
+                                      (item) => item.sessionId == session.sessionId,
+                                    );
+                                    setSheetState(() {});
+                                    if (!mounted) return;
+                                    setState(() => _sessions = List<AuthSessionItem>.from(localRows));
+                                    _showSnack('Session terminated');
+                                  } catch (error) {
+                                    _showSnack(error.toString());
+                                  }
+                                },
+                                icon: const Icon(Icons.close_rounded),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _checkUpdates() async {
@@ -744,6 +935,13 @@ class _SettingsTabState extends ConsumerState<SettingsTab> {
             onShowBlockedUsers: _showBlockedUsersSheet,
           ),
           SizedBox(height: context.sp(10)),
+          _DevicesSessionsCard(
+            sessions: _sessions,
+            loading: _loadingSessions,
+            onReload: _loadSessions,
+            onManageSessions: _showSessionsManager,
+          ),
+          SizedBox(height: context.sp(10)),
           _DataStorageSettingsCard(
             settings: _settings,
             loading: _loadingSettings,
@@ -1301,6 +1499,107 @@ class _DataStorageSettingsCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _DevicesSessionsCard extends StatelessWidget {
+  final List<AuthSessionItem> sessions;
+  final bool loading;
+  final Future<void> Function() onReload;
+  final Future<void> Function() onManageSessions;
+
+  const _DevicesSessionsCard({
+    required this.sessions,
+    required this.loading,
+    required this.onReload,
+    required this.onManageSessions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final currentSessionCount = sessions.where((item) => item.isCurrent).length;
+    final otherSessions = sessions.where((item) => !item.isCurrent).length;
+    return Card(
+      child: Padding(
+        padding: EdgeInsets.all(context.sp(14)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Devices',
+              style: TextStyle(
+                fontSize: context.sp(18),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            SizedBox(height: context.sp(6)),
+            Text(
+              'Manage active sessions, remote logout, and this device state.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            SizedBox(height: context.sp(10)),
+            if (loading)
+              const Center(child: CircularProgressIndicator())
+            else
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.devices_rounded),
+                title: const Text('Active sessions'),
+                subtitle: Text(
+                  sessions.isEmpty
+                      ? 'Load devices and active sessions'
+                      : '$currentSessionCount current • $otherSessions other',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: onManageSessions,
+              ),
+            if (!loading && sessions.isEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.tonal(
+                  onPressed: onReload,
+                  child: const Text('Load sessions'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SessionTile extends StatelessWidget {
+  final AuthSessionItem session;
+  final Widget? trailing;
+
+  const _SessionTile({required this.session, this.trailing});
+
+  @override
+  Widget build(BuildContext context) {
+    final lastUsed = session.lastUsedAt == null
+        ? 'Unknown activity'
+        : 'Last active ${_formatStorageMoment(session.lastUsedAt!)}';
+    final created = 'Signed in ${_formatStorageMoment(session.createdAt)}';
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        child: Icon(
+          session.isCurrent
+              ? Icons.smartphone_rounded
+              : Icons.devices_other_rounded,
+        ),
+      ),
+      title: Text(
+        session.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text('${session.subtitle}\n$lastUsed • $created'),
+      isThreeLine: true,
+      trailing: trailing,
     );
   }
 }
